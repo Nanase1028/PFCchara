@@ -640,14 +640,24 @@ function Confirm({result,onAdd,onReset,compact}){
   </div>;
 }
 
+/* ログ本文から登録先の日付を推定（"1/2量"のような分数や注釈は無視） */
+function findLogDate(text){
+  const lines=(text||"").split(/\r?\n/);
+  const re=/(\d{1,2})\s*\/\s*(\d{1,2})/;
+  const counter=/[量倍割個人本枚杯皿口分袋切玉]/;
+  const ymd=m=>{ const y=new Date().getFullYear(); return `${y}-${String(+m[1]).padStart(2,"0")}-${String(+m[2]).padStart(2,"0")}`; };
+  const pick=l=>{ const m=l.match(re); if(!m) return null; if(counter.test(l.charAt(m.index+m[0].length))) return null; return m; };
+  for(const l of lines){ if(/(摂取量|本日|合計|今日|日付)/.test(l)){ const m=pick(l); if(m) return ymd(m); } }
+  for(const l of lines){ if(/^\s*[※*]/.test(l)) continue; const m=pick(l); if(m) return ymd(m); }
+  return todayKey();
+}
+
 /* 1日分のログを貼り付け → 食事として分類 */
 function parseDayLog(text){
   const emoji=/^[\u2600-\u27BF\u2B00-\u2BFF\u{1F000}-\u{1FAFF}\uFE0F]/u;
   const lines=(text||"").split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
   let timing="昼食", names=[], intotal=false; const meals=[];
-  const dm=(text||"").match(/(\d{1,2})\s*\/\s*(\d{1,2})/);
-  let date=todayKey();
-  if(dm){ const y=new Date().getFullYear(); date=`${y}-${String(+dm[1]).padStart(2,"0")}-${String(+dm[2]).padStart(2,"0")}`; }
+  let date=findLogDate(text);
   const isTotal=l=>/合計|摂取量|総カロリー|total/i.test(l);
   const timingOf=l=>{ if(/朝/.test(l))return "朝食"; if(/昼/.test(l))return "昼食"; if(/夜|夕|晩/.test(l))return "夕食"; if(/酒|間食|おやつ|夜食|デザート|おつまみ/.test(l))return "間食"; return null; };
   for(const l of lines){
