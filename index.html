@@ -10,6 +10,7 @@
   body { margin: 0; font-family: -apple-system, "Hiragino Sans", sans-serif; background: #f3f4f6; }
   input, select, button, textarea { font-family: inherit; font-size: 15px; }
   input, select, textarea { width: 100%; padding: 12px; border: 1px solid #e5e7eb; border-radius: 10px; }
+  input[type="date"] { -webkit-appearance: none; appearance: none; text-align: left; max-width: 100%; min-width: 0; background: #fff; }
   .card { background: #fff; border-radius: 16px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
   .pri { width: 100%; padding: 13px; border: none; border-radius: 10px; background: #2563eb; color: #fff; font-weight: 700; cursor: pointer; }
   .pri:disabled { background: #9ca3af; }
@@ -675,7 +676,7 @@ function PasteMeals({onRegisterDay, defaultDate}){
       </div>
     </div>
 
-    <textarea rows={6} value={text} onChange={e=>setText(e.target.value)} placeholder={"☀️朝ごはん\n卵とエビサンド（成城石井）\n約360kcal (P16g, F17g, C37g)\n\n🌛夜ごはん\nラーメン\n約940kcal (P43g, F37.5g, C115g)"} style={{marginBottom:10,resize:"vertical"}}/>
+    <textarea rows={8} value={text} onChange={e=>setText(e.target.value)} placeholder={"☀️朝ごはん\n卵とエビサンド（成城石井）\n約360kcal (P16g, F17g, C37g)\n\n🌛夜ごはん\nラーメン\n約940kcal (P43g, F37.5g, C115g)"} style={{marginBottom:10,resize:"vertical",minHeight:180,lineHeight:1.5}}/>
     <button className="pri" onClick={run} disabled={!text.trim()}>解析する</button>
 
     {parsed && parsed.meals.length>0 && <div style={{marginTop:12}}>
