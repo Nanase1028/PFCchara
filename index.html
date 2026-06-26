@@ -38,6 +38,7 @@
 const { useState, useEffect, useRef } = React;
 
 const APP_NAME = "PFC Log";   // ← 名前を変えたいときはここだけ
+const APP_VERSION = "2026.06.27 (連動・日付編集版)";
 
 const C = {
   blue:"#2563eb", blueSoft:"#dbeafe",
@@ -851,6 +852,7 @@ function RegisterTab({favorites,goals,weights,date,apiKey,model,onAddFav,onDelFa
         <span onClick={()=>onDelFav(x.id)} style={{cursor:"pointer"}}><Icon n="trash" s={18}/></span>
       </div>
     ))}
+    <div style={{textAlign:"center",fontSize:11,color:C.sub,padding:"14px 0 4px"}}>{APP_NAME} ver. {APP_VERSION}</div>
   </>;
 }
 
