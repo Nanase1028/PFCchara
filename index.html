@@ -218,7 +218,7 @@ function App(){
       <div className="scroll" style={{flex:1,overflowY:"auto",padding:16,paddingBottom:90}}>
         {tab==="home" && <HomeTab meals={meals} goals={goals} allMeals={allMeals} date={date} onDelete={delMeal}/>}
         {tab==="graph" && <GraphTab allMeals={allMeals} weights={weights} goals={goals}/>}
-        {tab==="record" && <RecordTab favorites={favorites} onAdd={addMeal} onRegisterDay={addMealsToDate} apiKey={apiKey} model={model} goto={()=>setTab("register")}/>}
+        {tab==="record" && <RecordTab favorites={favorites} onAdd={addMeal} onRegisterDay={addMealsToDate} date={date} apiKey={apiKey} model={model} goto={()=>setTab("register")}/>}
         {tab==="register" && <RegisterTab favorites={favorites} goals={goals} weights={weights} date={date} apiKey={apiKey} model={model}
             onAddFav={addFav} onDelFav={delFav} onSaveGoals={saveGoals} onSaveWeight={saveWeight} onSaveKey={saveKey} onSaveModel={saveModel}/>}
         {tab==="history" && <HistoryTab allMeals={allMeals}/>}
@@ -499,7 +499,7 @@ function GraphTab({allMeals,weights,goals}){
   </>;
 }
 
-function RecordTab({favorites,onAdd,onRegisterDay,apiKey,model,goto}){
+function RecordTab({favorites,onAdd,onRegisterDay,date,apiKey,model,goto}){
   const [mode,setMode]=useState("label");
   const modes=[["manual","手動","pen"],["fav","お気に入り","star"],["paste","貼付け","list"],["label","ラベル","cam"],["ai","AIチャット","bot"]];
   return <>
@@ -512,7 +512,7 @@ function RecordTab({favorites,onAdd,onRegisterDay,apiKey,model,goto}){
     </div>
     {mode==="manual" && <ManualForm onAdd={onAdd}/>}
     {mode==="fav" && <FavPick favorites={favorites} onAdd={onAdd}/>}
-    {mode==="paste" && <PasteMeals onRegisterDay={onRegisterDay}/>}
+    {mode==="paste" && <PasteMeals onRegisterDay={onRegisterDay} defaultDate={date}/>}
     {mode==="label" && <LabelScan onAdd={onAdd} apiKey={apiKey} model={model} goto={goto}/>}
     {mode==="ai" && <AIChat onAdd={onAdd} apiKey={apiKey} model={model} goto={goto}/>}
   </>;
@@ -640,16 +640,30 @@ function Confirm({result,onAdd,onReset,compact}){
   </div>;
 }
 
-/* ログ本文から登録先の日付を推定（"1/2量"のような分数や注釈は無視） */
+/* ログ本文から登録先の日付を推定。見つからなければ null（"1/2量"等は無視） */
 function findLogDate(text){
   const lines=(text||"").split(/\r?\n/);
-  const re=/(\d{1,2})\s*\/\s*(\d{1,2})/;
-  const counter=/[量倍割個人本枚杯皿口分袋切玉]/;
-  const ymd=m=>{ const y=new Date().getFullYear(); return `${y}-${String(+m[1]).padStart(2,"0")}-${String(+m[2]).padStart(2,"0")}`; };
-  const pick=l=>{ const m=l.match(re); if(!m) return null; if(counter.test(l.charAt(m.index+m[0].length))) return null; return m; };
-  for(const l of lines){ if(/(摂取量|本日|合計|今日|日付)/.test(l)){ const m=pick(l); if(m) return ymd(m); } }
-  for(const l of lines){ if(/^\s*[※*]/.test(l)) continue; const m=pick(l); if(m) return ymd(m); }
-  return todayKey();
+  const Y=new Date().getFullYear();
+  const valid=(mo,d)=> mo>=1&&mo<=12&&d>=1&&d<=31;
+  const ymd=(mo,d)=> `${Y}-${String(mo).padStart(2,"0")}-${String(d).padStart(2,"0")}`;
+  const counter="量倍割個人本枚杯皿口分袋切玉合勺人前";
+  // 1) M月D日（最も確実）
+  for(const l of lines){ const m=l.match(/(\d{1,2})\s*月\s*(\d{1,2})\s*日/); if(m&&valid(+m[1],+m[2])) return ymd(+m[1],+m[2]); }
+  // 2) YYYY/M/D（年つき）
+  for(const l of lines){ const m=l.match(/\d{4}\s*[\/.\-]\s*(\d{1,2})\s*[\/.\-]\s*(\d{1,2})/); if(m&&valid(+m[1],+m[2])) return ymd(+m[1],+m[2]); }
+  // 3) M/D。まず「摂取量/本日/合計…」を含む行、無ければ ※以外の行。助数詞が続く分数は除外
+  const scan=(filter)=>{
+    for(const l of lines){
+      if(!filter(l)) continue;
+      const re=/(\d{1,2})\s*\/\s*(\d{1,2})/g; let m;
+      while((m=re.exec(l))){
+        if(counter.includes(l.charAt(m.index+m[0].length))) continue;
+        if(valid(+m[1],+m[2])) return ymd(+m[1],+m[2]);
+      }
+    }
+    return null;
+  };
+  return scan(l=>/(摂取量|本日|合計|今日|日付|記録)/.test(l)) || scan(l=>!/^\s*[※*]/.test(l)) || null;
 }
 
 /* 1日分のログを貼り付け → 食事として分類 */
@@ -678,18 +692,22 @@ function parseDayLog(text){
   return {date, meals};
 }
 
-function PasteMeals({onRegisterDay}){
-  const [text,setText]=useState(""); const [parsed,setParsed]=useState(null); const [msg,setMsg]=useState("");
-  const run=()=>{ const r=parseDayLog(text); setParsed(r); setMsg(""); };
-  const commit=()=>{ onRegisterDay(parsed.date, parsed.meals); setMsg(`${parsed.meals.length}件を ${fmtDate(parsed.date)} に登録しました`); setText(""); setParsed(null); };
+function PasteMeals({onRegisterDay, defaultDate}){
+  const [text,setText]=useState(""); const [parsed,setParsed]=useState(null); const [target,setTarget]=useState(defaultDate||todayKey()); const [detected,setDetected]=useState(false); const [msg,setMsg]=useState("");
+  const run=()=>{ const r=parseDayLog(text); setParsed(r); setDetected(!!r.date); setTarget(r.date||defaultDate||todayKey()); setMsg(""); };
+  const commit=()=>{ onRegisterDay(target, parsed.meals); setMsg(`${parsed.meals.length}件を ${fmtDateW(target)} に登録しました`); setText(""); setParsed(null); };
   const sum=parsed?parsed.meals.reduce((a,m)=>({kcal:a.kcal+m.kcal,p:a.p+m.p,f:a.f+m.f,c:a.c+m.c}),{kcal:0,p:0,f:0,c:0}):null;
   return <div className="card">
     <div style={{fontWeight:700,color:C.ink,marginBottom:6}}>ログを貼り付けて記録</div>
-    <div style={{fontSize:12,color:C.sub,marginBottom:10}}>1日分の食事ログを貼り付け → 解析 → 登録。絵文字の見出し(朝/昼/夜/お酒)で自動分類し、日付(例 6/25)も読み取ります。</div>
+    <div style={{fontSize:12,color:C.sub,marginBottom:10}}>1日分の食事ログを貼り付け → 解析 → 登録。絵文字の見出し(朝/昼/夜/お酒)で自動分類します。日付は読み取りを試みますが、登録前にいつでも変更できます。</div>
     <textarea rows={6} value={text} onChange={e=>setText(e.target.value)} placeholder={"☀️朝ごはん\n卵とエビサンド（成城石井）\n約360kcal (P16g, F17g, C37g)\n\n🌛夜ごはん\nラーメン\n約940kcal (P43g, F37.5g, C115g)"} style={{marginBottom:10,resize:"vertical"}}/>
     <button className="pri" onClick={run} disabled={!text.trim()}>解析する</button>
     {parsed && parsed.meals.length>0 && <div style={{marginTop:12}}>
-      <div style={{fontSize:13,color:C.sub,marginBottom:6}}>登録先の日付: <b style={{color:C.ink}}>{fmtDate(parsed.date)}</b></div>
+      <div style={{background:C.bg,borderRadius:12,padding:"10px 12px",marginBottom:10}}>
+        <div style={{fontSize:13,color:C.ink,fontWeight:600,marginBottom:6}}>登録先の日付</div>
+        <input type="date" value={target} max={todayKey()} onChange={e=>e.target.value&&setTarget(e.target.value)} style={{padding:"10px 12px"}}/>
+        <div style={{fontSize:11,color:C.sub,marginTop:6}}>{detected ? `ログから ${fmtDate(parsed.date)} を検出しました。違う場合は上で変更できます。` : "ログから日付が読み取れませんでした。選択中の日付にしています。必要なら変更してください。"}</div>
+      </div>
       {parsed.meals.map((m,i)=>(
         <div key={i} style={{display:"flex",alignItems:"center",gap:8,fontSize:13,padding:"7px 0",borderBottom:`1px solid ${C.line}`}}>
           <span style={{fontSize:11,color:C.blue,background:C.blueSoft,padding:"2px 7px",borderRadius:6,whiteSpace:"nowrap"}}>{m.timing}</span>
@@ -698,7 +716,7 @@ function PasteMeals({onRegisterDay}){
         </div>
       ))}
       <div style={{fontSize:12,color:C.sub,margin:"8px 0"}}>合計 {sum.kcal}kcal · P{sum.p} F{sum.f} C{sum.c}</div>
-      <button className="pri" onClick={commit}>この{parsed.meals.length}件を記録</button>
+      <button className="pri" onClick={commit}>{fmtDate(target)} にこの{parsed.meals.length}件を記録</button>
     </div>}
     {parsed && parsed.meals.length===0 && <div style={{color:C.fat,fontSize:13,marginTop:10}}>食事を読み取れませんでした。各品の行に「○○kcal (P.. F.. C..)」が含まれているか確認してください。</div>}
     {msg && <div style={{color:C.blue,fontWeight:600,fontSize:14,marginTop:10}}>✓ {msg}</div>}
