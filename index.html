@@ -1,0 +1,846 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<title>PFC Log</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body { margin: 0; font-family: -apple-system, "Hiragino Sans", sans-serif; background: #f3f4f6; }
+  input, select, button, textarea { font-family: inherit; font-size: 15px; }
+  input, select, textarea { width: 100%; padding: 12px; border: 1px solid #e5e7eb; border-radius: 10px; }
+  .card { background: #fff; border-radius: 16px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+  .pri { width: 100%; padding: 13px; border: none; border-radius: 10px; background: #2563eb; color: #fff; font-weight: 700; cursor: pointer; }
+  .pri:disabled { background: #9ca3af; }
+  .scroll::-webkit-scrollbar { display: none; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .spin { display:inline-block; width:16px; height:16px; border:2px solid #fff; border-top-color:transparent; border-radius:99px; animation:spin .8s linear infinite; }
+  @keyframes bob { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-7px); } }
+  @keyframes pop { 0% { transform: scale(.6); opacity:0; } 100% { transform: scale(1); opacity:1; } }
+  @keyframes float2 { 0%,100% { transform: translateY(0) rotate(-2deg); } 50% { transform: translateY(-5px) rotate(2deg); } }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script>
+  // 開発用Babelの注意メッセージを非表示にする
+  const _warn = console.warn;
+  console.warn = function(){ if((arguments[0]||"").toString().includes("in-browser Babel")) return; return _warn.apply(console, arguments); };
+</script>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+
+<script type="text/babel">
+const { useState, useEffect, useRef } = React;
+
+const APP_NAME = "PFC Log";   // ← 名前を変えたいときはここだけ
+
+const C = {
+  blue:"#2563eb", blueSoft:"#dbeafe",
+  kcal:"#111827",   // カロリー 黒
+  prot:"#2563eb",   // タンパク質 青
+  fat:"#dc2626",    // 脂質 赤
+  carb:"#ca8a04",   // 炭水化物 黄
+  weight:"#0891b2",
+  ink:"#1f2937", sub:"#6b7280", line:"#e5e7eb", bg:"#f3f4f6",
+};
+const TIMINGS = ["朝食","昼食","夕食","間食"];
+const todayKey = () => new Date().toISOString().slice(0,10);
+const fmtDate = (k) => k.slice(5).replace("-","/");
+const WD = ["日","月","火","水","木","金","土"];
+const shiftDate = (k, delta) => { const d = new Date(k+"T00:00:00"); d.setDate(d.getDate()+delta); return d.toISOString().slice(0,10); };
+const fmtDateW = (k) => `${fmtDate(k)}(${WD[new Date(k+"T00:00:00").getDay()]})`;
+const uid = () => Math.random().toString(36).slice(2,9);
+
+/* よく食べるセット（初回起動時に自動登録。値は目安、登録タブで編集可） */
+const DEFAULT_FAVORITES = [
+  {id:"fav_hakumai", name:"白米 茶碗一杯(150g)", kcal:252, p:4, f:1, c:56},
+  {id:"fav_genmai",  name:"玄米 茶碗一杯(150g)", kcal:248, p:4, f:2, c:53},
+  {id:"fav_vinegar", name:"VINEGAR PROTEIN(レモンライム)", kcal:64, p:11, f:0, c:5},
+  {id:"fav_savas",   name:"SAVAS バナナ味", kcal:102, p:15, f:0, c:11},
+  {id:"fav_milktea", name:"ミルクティー(無糖)", kcal:30, p:2, f:2, c:2},
+  {id:"fav_shio",    name:"塩ラーメン", kcal:460, p:16, f:14, c:66},
+  {id:"fav_sasami",  name:"とりささみ1本(80g)", kcal:78, p:19, f:1, c:0},
+  {id:"fav_tkg",     name:"卵かけ納豆ご飯(米150+納豆+卵)", kcal:428, p:18, f:11, c:62},
+  {id:"fav_eggsand", name:"卵サンド", kcal:340, p:12, f:21, c:25},
+  {id:"fav_misoshiru", name:"味噌汁(お椀一杯)", kcal:40, p:3, f:1, c:5},
+  {id:"fav_salmon",  name:"焼き鮭(1切れ80g)", kcal:133, p:18, f:6, c:0},
+];
+
+/* ---- safe localStorage ---- */
+const mem = {};
+const LS = {
+  get(k, fb){ try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fb; } catch { return k in mem ? mem[k] : fb; } },
+  set(k, v){ try { localStorage.setItem(k, JSON.stringify(v)); } catch { mem[k] = v; } },
+};
+
+/* ---- OpenAI API (direct browser, user's own key) ---- */
+async function askOpenAI(apiKey, model, messages){
+  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: { "content-type": "application/json", "authorization": "Bearer " + apiKey },
+    body: JSON.stringify({ model: model || "gpt-4o", messages }),
+  });
+  const data = await res.json();
+  if (data.error) throw new Error(data.error.message || "APIエラー");
+  return data.choices?.[0]?.message?.content || "";
+}
+function parseJSON(t){ const c=t.replace(/```json|```/g,"").trim(); const s=c.indexOf("{"),e=c.lastIndexOf("}"); return JSON.parse(s>=0?c.slice(s,e+1):c); }
+
+/* ---- icons ---- */
+const I = {
+  home:"M3 11l9-8 9 8M5 10v10h5v-6h4v6h5V10",
+  graph:"M4 19V5M4 19h16M8 15l3-4 3 2 4-6",
+  star:"M12 3l2.9 6 6.6.9-4.8 4.6 1.2 6.5L12 18l-5.9 3 1.2-6.5L2.5 9.9 9 9z",
+  hist:"M3 12a9 9 0 1 0 3-6.7L3 8M3 4v4h4M12 8v4l3 2",
+  cam:"M4 8h3l2-2h6l2 2h3v11H4zM12 17a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7z",
+  img:"M4 5h16v14H4zM4 16l4-4 3 3 4-5 5 6",
+  bot:"M9 3v2m6-2v2M5 8h14v11H5zM9 13h.01M15 13h.01M2 12h3m14 0h3",
+  pen:"M4 20h4L18 10l-4-4L4 16zM14 6l4 4",
+  trash:"M4 6h16M9 6V4h6v2m-8 0l1 14h8l1-14",
+  send:"M4 12l16-7-7 16-2-7z",
+  list:"M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01",
+  logo:"M4 14c0 4 3.5 6 8 6s8-2 8-6c0-3-2-5-4-8-1 2-2 3-4 3 0-2-1-4-2-6-2 3-4 6-4 11z",
+};
+const Icon = ({n, c=C.sub, s=22}) => (
+  <svg width={s} height={s} viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d={I[n]}/></svg>
+);
+
+/* ---- ring ---- */
+function Ring({value, goal}){
+  const r=78, circ=2*Math.PI*r, pct=Math.min(1, goal? value/goal:0);
+  return (
+    <svg width="190" height="190" viewBox="0 0 200 200">
+      <circle cx="100" cy="100" r={r} fill="none" stroke={C.line} strokeWidth="14"/>
+      <circle cx="100" cy="100" r={r} fill="none" stroke={C.kcal} strokeWidth="14" strokeLinecap="round"
+        strokeDasharray={circ} strokeDashoffset={circ*(1-pct)} transform="rotate(-90 100 100)" style={{transition:"stroke-dashoffset .5s"}}/>
+      <text x="100" y="94" textAnchor="middle" fontSize="34" fontWeight="700" fill={C.ink}>{Math.round(value)}</text>
+      <text x="100" y="120" textAnchor="middle" fontSize="16" fill={C.sub}>kcal</text>
+    </svg>
+  );
+}
+
+/* ---- line chart with dashed baselines ---- */
+function Chart({data, series, baselines=[], height=200}){
+  const W=320, H=height, padX=36, padT=14, padB=24;
+  const xs=data.map((_,i)=> padX + (data.length<=1?(W-padX*2)/2 : i*(W-padX*2)/(data.length-1)));
+  const vals=[...series.flatMap(s=>data.map(d=>d[s.key]).filter(v=>v!=null&&!isNaN(v))), ...baselines.map(b=>b.value)];
+  let max=vals.length?Math.max(...vals):1, min=vals.length?Math.min(...vals):0;
+  if(min===max){max+=1;min-=1;}
+  const r=max-min; max+=r*0.14; min-=r*0.14;
+  const y=v=> (H-padB) - (v-min)/(max-min)*(H-padT-padB);
+  const every=Math.ceil(data.length/7)||1;
+  return (
+    <svg width="100%" viewBox={`0 0 ${W} ${H}`}>
+      {baselines.map((b,i)=>(
+        <g key={"b"+i}>
+          <line x1={padX} y1={y(b.value)} x2={W-padX} y2={y(b.value)} stroke={b.color} strokeWidth="1.5" strokeDasharray="2 3" opacity="0.8"/>
+          {b.label && <text x={W-padX} y={y(b.value)-4} textAnchor="end" fontSize="9" fill={b.color}>{b.label}</text>}
+        </g>
+      ))}
+      {series.map(s=>{
+        const pts=data.map((d,i)=> d[s.key]==null||isNaN(d[s.key])?null:`${xs[i]},${y(d[s.key])}`).filter(Boolean).join(" ");
+        return <polyline key={s.key} points={pts} fill="none" stroke={s.color} strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"/>;
+      })}
+      {series.map(s=>data.map((d,i)=> d[s.key]==null||isNaN(d[s.key])?null:<circle key={s.key+i} cx={xs[i]} cy={y(d[s.key])} r="3" fill={s.color}/>))}
+      {data.map((d,i)=> i%every===0?<text key={"x"+i} x={xs[i]} y={H-8} textAnchor="middle" fontSize="9" fill={C.sub}>{d.date}</text>:null)}
+    </svg>
+  );
+}
+
+const Bar = ({label,color,value,goal}) => {
+  const pct=Math.min(100, goal?(value/goal)*100:0);
+  return <div style={{marginBottom:12}}>
+    <div style={{display:"flex",justifyContent:"space-between",fontSize:14,marginBottom:5}}>
+      <span style={{color:C.ink}}><span style={{color,marginRight:6}}>●</span>{label}</span>
+      <span style={{color:C.sub}}>{Math.round(value)}g / {goal}g</span>
+    </div>
+    <div style={{height:8,background:C.line,borderRadius:99}}><div style={{height:8,width:pct+"%",background:color,borderRadius:99,transition:"width .4s"}}/></div>
+  </div>;
+};
+
+/* ---- 日付ナビゲーション ---- */
+function DateBar({date,setDate}){
+  const ref=useRef();
+  const isToday=date===todayKey();
+  const open=()=>{ const el=ref.current; if(!el) return; try{ el.showPicker ? el.showPicker() : el.click(); }catch{ el.click(); } };
+  const arrow={width:30,height:30,border:"none",borderRadius:9,background:"#fff",color:C.blue,fontSize:20,lineHeight:1,cursor:"pointer",boxShadow:"0 1px 2px rgba(0,0,0,.08)",display:"grid",placeItems:"center"};
+  return (
+    <div style={{marginLeft:"auto",display:"flex",alignItems:"center",gap:4}}>
+      {!isToday && <button onClick={()=>setDate(todayKey())} style={{border:"none",borderRadius:8,background:C.blue,color:"#fff",fontSize:11,fontWeight:700,padding:"5px 8px",cursor:"pointer"}}>今日</button>}
+      <button onClick={()=>setDate(shiftDate(date,-1))} style={arrow}>‹</button>
+      <button onClick={open} style={{position:"relative",border:"none",borderRadius:9,background:"#fff",color:C.ink,fontSize:13,fontWeight:700,padding:"6px 10px",cursor:"pointer",boxShadow:"0 1px 2px rgba(0,0,0,.08)",whiteSpace:"nowrap"}}>
+        {fmtDateW(date)}
+        <input ref={ref} type="date" value={date} max={todayKey()} onChange={e=>e.target.value&&setDate(e.target.value)}
+          style={{position:"absolute",inset:0,opacity:0,pointerEvents:"none",width:"100%",height:"100%"}}/>
+      </button>
+      <button onClick={()=>{ if(!isToday) setDate(shiftDate(date,1)); }} disabled={isToday} style={{...arrow,opacity:isToday?0.35:1,cursor:isToday?"default":"pointer"}}>›</button>
+    </div>
+  );
+}
+
+/* ================= APP ================= */
+function App(){
+  const [tab,setTab]=useState("home");
+  const [date,setDate]=useState(todayKey());
+  const [allMeals,setAllMeals]=useState(()=>LS.get("allMeals",{}));
+  const [favorites,setFavorites]=useState(()=>{ const s=LS.get("favorites",null); if(s) return s; LS.set("favorites",DEFAULT_FAVORITES); return DEFAULT_FAVORITES; });
+  const [goals,setGoals]=useState(()=>LS.get("goals",{kcal:1250,p:78,f:34,c:156}));
+  const [weights,setWeights]=useState(()=>LS.get("weights",{}));
+  const [apiKey,setApiKey]=useState(()=>LS.get("apiKey",""));
+  const [model,setModel]=useState(()=>LS.get("model","gpt-4o"));
+
+  const meals = allMeals[date] || [];
+  const persistMeals=(next)=>{ const a={...allMeals,[date]:next}; setAllMeals(a); LS.set("allMeals",a); };
+  const addMeal=(m)=>persistMeals([...meals,{id:uid(),...m}]);
+  const addMealsToDate=(dk,items)=>{ const a={...allMeals}; const cur=a[dk]?[...a[dk]]:[]; items.forEach(m=>cur.push({id:uid(),...m})); a[dk]=cur; setAllMeals(a); LS.set("allMeals",a); };
+  const delMeal=(id)=>persistMeals(meals.filter(x=>x.id!==id));
+  const addFav=(f)=>{const n=[...favorites,{id:uid(),...f}];setFavorites(n);LS.set("favorites",n);};
+  const delFav=(id)=>{const n=favorites.filter(x=>x.id!==id);setFavorites(n);LS.set("favorites",n);};
+  const saveGoals=(g)=>{setGoals(g);LS.set("goals",g);};
+  const saveWeight=(k,v)=>{const n={...weights,[k]:v};setWeights(n);LS.set("weights",n);};
+  const saveKey=(k)=>{setApiKey(k);LS.set("apiKey",k);};
+  const saveModel=(m)=>{setModel(m);LS.set("model",m);};
+
+  const tabs=[["home","ホーム","home"],["graph","グラフ","graph"],["record","記録","add"],["register","登録","star"],["history","履歴","hist"]];
+
+  return (
+    <div style={{maxWidth:440,margin:"0 auto",minHeight:"100vh",display:"flex",flexDirection:"column",background:C.bg}}>
+      <div style={{display:"flex",alignItems:"center",gap:8,padding:"12px 14px",background:"linear-gradient(90deg,#eff6ff,#dbeafe)",borderBottom:`1px solid ${C.line}`,position:"sticky",top:0,zIndex:5}}>
+        <span style={{fontSize:18}}>🔥</span><span style={{fontWeight:700,fontSize:17,color:C.ink}}>{APP_NAME}</span>
+        <DateBar date={date} setDate={setDate}/>
+      </div>
+
+      <div className="scroll" style={{flex:1,overflowY:"auto",padding:16,paddingBottom:90}}>
+        {tab==="home" && <HomeTab meals={meals} goals={goals} allMeals={allMeals} date={date} onDelete={delMeal}/>}
+        {tab==="graph" && <GraphTab allMeals={allMeals} weights={weights} goals={goals}/>}
+        {tab==="record" && <RecordTab favorites={favorites} onAdd={addMeal} onRegisterDay={addMealsToDate} apiKey={apiKey} model={model} goto={()=>setTab("register")}/>}
+        {tab==="register" && <RegisterTab favorites={favorites} goals={goals} weights={weights} date={date} apiKey={apiKey} model={model}
+            onAddFav={addFav} onDelFav={delFav} onSaveGoals={saveGoals} onSaveWeight={saveWeight} onSaveKey={saveKey} onSaveModel={saveModel}/>}
+        {tab==="history" && <HistoryTab allMeals={allMeals}/>}
+      </div>
+
+      <div style={{position:"fixed",bottom:0,left:0,right:0,maxWidth:440,margin:"0 auto",display:"flex",justifyContent:"space-around",alignItems:"center",padding:"8px 0 16px",background:"#fff",borderTop:`1px solid ${C.line}`}}>
+        {tabs.map(([id,label,icon])=>{
+          const active=tab===id;
+          if(id==="record") return (
+            <button key={id} onClick={()=>setTab(id)} style={{border:"none",background:"none",display:"flex",flexDirection:"column",alignItems:"center",cursor:"pointer"}}>
+              <div style={{width:52,height:52,borderRadius:99,background:C.blue,display:"grid",placeItems:"center",marginTop:-22,boxShadow:"0 4px 12px rgba(37,99,235,.4)"}}>
+                <svg width="26" height="26" viewBox="0 0 24 24" stroke="#fff" strokeWidth="2.5" strokeLinecap="round"><path d="M12 5v14M5 12h14"/></svg>
+              </div>
+              <span style={{fontSize:11,color:C.sub,marginTop:2}}>{label}</span>
+            </button>
+          );
+          return (
+            <button key={id} onClick={()=>setTab(id)} style={{border:"none",background:"none",display:"flex",flexDirection:"column",alignItems:"center",gap:3,cursor:"pointer"}}>
+              <Icon n={icon} c={active?C.blue:C.sub}/><span style={{fontSize:11,color:active?C.blue:C.sub}}>{label}</span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+/* ===== 育成キャラ「ペコまる」 ===== */
+const FORMS = {
+  egg:     {name:"たまご",                 title:"たまご期",                   emoji:"🥚", color:"#f59e0b", soft:"#fef3c7", msg:"ごはんを記録すると、たまごからペコまるが生まれて育っていくよ。"},
+  balance: {name:"ヒーローペコまる",       title:"バランス◎ ヒーロー期",       emoji:"✨", color:"#d97706", soft:"#fef3c7", msg:"PFCのバランスがいい感じ！理想体型をキープしてるよ。"},
+  p:       {name:"マッチョペコまる",       title:"タンパク質たっぷり マッチョ期", emoji:"💪", color:C.prot,    soft:"#dbeafe", msg:"タンパク質が多めで、筋肉ムキムキに育ってるよ！"},
+  f:       {name:"こぶたペコまる",         title:"脂質おおめ こぶた期",         emoji:"🐷", color:"#db2777", soft:"#fce7f3", msg:"脂質が多めで、まるまる育ってきたみたい…！"},
+  c:       {name:"ゆきだるまペコまる",     title:"炭水化物おおめ ゆきだるま期", emoji:"⛄", color:C.carb,    soft:"#fef9c3", msg:"炭水化物が多めで、ふわふわ雪だるま体型に。"},
+};
+
+/* 直近の食事傾向から「フォーム」を、累計記録日数から「レベル」を決める */
+function pickForm(allMeals, goals){
+  const dates=Object.keys(allMeals).filter(k=>(allMeals[k]||[]).length>0).sort();
+  const loggedDays=dates.length;
+  const recent=dates.slice(-7);
+  let P=0,F=0,Cb=0;
+  recent.forEach(k=>(allMeals[k]||[]).forEach(m=>{P+=m.p||0;F+=m.f||0;Cb+=m.c||0;}));
+  const n=recent.length||1;
+  const avg={p:P/n,f:F/n,c:Cb/n};
+  const gp=goals.p||1, gf=goals.f||1, gc=goals.c||1;
+  const r={p:avg.p/gp, f:avg.f/gf, c:avg.c/gc};
+  let form="egg";
+  if(loggedDays>0 && (avg.p+avg.f+avg.c)>0){
+    const arr=[["p",r.p],["f",r.f],["c",r.c]].sort((a,b)=>b[1]-a[1]);
+    const top=arr[0], othersAvg=(arr[1][1]+arr[2][1])/2;
+    if(top[1]-othersAvg<0.22 || top[1]<othersAvg*1.18) form="balance";
+    else form=top[0];
+  }
+  const exp=loggedDays;
+  const level=Math.floor((1+Math.sqrt(1+8*exp))/2);
+  const curBase=(level-1)*level/2, nextBase=level*(level+1)/2;
+  return {form, loggedDays, level, expInto:exp-curBase, expSpan:nextBase-curBase, avg, ratios:r, recentCount:recent.length};
+}
+
+/* フォームごとに姿が変わるSVGマスコット */
+function Mascot({form, s=180}){
+  const eye=(cx,cy,r=7)=>(<g><circle cx={cx} cy={cy} r={r} fill="#3a2d22"/><circle cx={cx-2} cy={cy-2.5} r={r*0.32} fill="#fff"/></g>);
+  let body;
+  if(form==="egg"){
+    body=(<g>
+      <ellipse cx="100" cy="118" rx="50" ry="60" fill="#fffaf0" stroke="#eccf8e" strokeWidth="3"/>
+      <path d="M78 96 l10 8 -9 7 11 7 -8 7" fill="none" stroke="#e3bf76" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"/>
+      {eye(86,128,5)}{eye(114,128,5)}
+      <path d="M93 142 q7 6 14 0" fill="none" stroke="#3a2d22" strokeWidth="3" strokeLinecap="round"/>
+    </g>);
+  } else if(form==="balance"){
+    body=(<g>
+      <path d="M58 70 l-8 -14" stroke="#e3b23c" strokeWidth="5" strokeLinecap="round"/>
+      <path d="M142 70 l8 -14" stroke="#e3b23c" strokeWidth="5" strokeLinecap="round"/>
+      <path d="M100 18 l5 11 12 1 -9 9 3 12 -11 -6 -11 6 3 -12 -9 -9 12 -1z" fill="#fbbf24" stroke="#e3a008" strokeWidth="1.5"/>
+      <ellipse cx="100" cy="118" rx="58" ry="56" fill="#fff7e6" stroke="#e8cf86" strokeWidth="3.5"/>
+      <ellipse cx="52" cy="120" rx="13" ry="18" fill="#fff7e6" stroke="#e8cf86" strokeWidth="3.5"/>
+      <ellipse cx="148" cy="120" rx="13" ry="18" fill="#fff7e6" stroke="#e8cf86" strokeWidth="3.5"/>
+      <ellipse cx="78" cy="138" rx="11" ry="7" fill="#fbcfe0" opacity="0.8"/>
+      <ellipse cx="122" cy="138" rx="11" ry="7" fill="#fbcfe0" opacity="0.8"/>
+      <path d="M80 116 q6 -8 12 0" fill="none" stroke="#3a2d22" strokeWidth="3.5" strokeLinecap="round"/>
+      <path d="M108 116 q6 -8 12 0" fill="none" stroke="#3a2d22" strokeWidth="3.5" strokeLinecap="round"/>
+      <path d="M88 132 q12 12 24 0" fill="none" stroke="#3a2d22" strokeWidth="3.5" strokeLinecap="round"/>
+      <ellipse cx="86" cy="172" rx="13" ry="8" fill="#f6d98a"/>
+      <ellipse cx="114" cy="172" rx="13" ry="8" fill="#f6d98a"/>
+    </g>);
+  } else if(form==="p"){
+    body=(<g>
+      <ellipse cx="44" cy="122" rx="20" ry="16" fill="#fde9c8" stroke="#e8b06a" strokeWidth="3"/>
+      <ellipse cx="156" cy="122" rx="20" ry="16" fill="#fde9c8" stroke="#e8b06a" strokeWidth="3"/>
+      <rect x="36" y="118" width="18" height="22" rx="9" fill="#fde9c8" stroke="#e8b06a" strokeWidth="3"/>
+      <rect x="146" y="118" width="18" height="22" rx="9" fill="#fde9c8" stroke="#e8b06a" strokeWidth="3"/>
+      <ellipse cx="100" cy="120" rx="54" ry="54" fill="#fff3e0" stroke="#e8cf86" strokeWidth="3.5"/>
+      <path d="M52 96 q48 -20 96 0 l0 9 q-48 -16 -96 0z" fill={C.prot}/>
+      <path d="M150 100 l16 -5 -4 11z" fill={C.prot}/>
+      <path d="M80 116 l13 4 M120 116 l-13 4" stroke="#3a2d22" strokeWidth="3.5" strokeLinecap="round"/>
+      {eye(86,126)}{eye(114,126)}
+      <path d="M90 144 q10 9 20 0" fill="none" stroke="#3a2d22" strokeWidth="3.5" strokeLinecap="round"/>
+      <path d="M150 80 q5 8 0 13 q-5 -5 0 -13z" fill="#7dd3fc"/>
+      <ellipse cx="84" cy="138" rx="9" ry="6" fill="#fbcfe0" opacity="0.7"/>
+      <ellipse cx="116" cy="138" rx="9" ry="6" fill="#fbcfe0" opacity="0.7"/>
+    </g>);
+  } else if(form==="f"){
+    body=(<g>
+      <path d="M64 78 l-6 -22 22 12z" fill="#f7a8c4" stroke="#e26d98" strokeWidth="3" strokeLinejoin="round"/>
+      <path d="M136 78 l6 -22 -22 12z" fill="#f7a8c4" stroke="#e26d98" strokeWidth="3" strokeLinejoin="round"/>
+      <ellipse cx="100" cy="122" rx="64" ry="56" fill="#f9c6d3" stroke="#e98aa6" strokeWidth="3.5"/>
+      <ellipse cx="74" cy="132" rx="12" ry="8" fill="#f3a8bd" opacity="0.8"/>
+      <ellipse cx="126" cy="132" rx="12" ry="8" fill="#f3a8bd" opacity="0.8"/>
+      {eye(82,112,7)}{eye(118,112,7)}
+      <ellipse cx="100" cy="138" rx="22" ry="15" fill="#f3a0b7" stroke="#e07a9a" strokeWidth="2.5"/>
+      <ellipse cx="92" cy="138" rx="3.5" ry="5" fill="#c25b7e"/>
+      <ellipse cx="108" cy="138" rx="3.5" ry="5" fill="#c25b7e"/>
+      <path d="M160 130 q12 -2 8 10 q-2 8 -10 4" fill="none" stroke="#e98aa6" strokeWidth="3.5" strokeLinecap="round"/>
+      <ellipse cx="80" cy="176" rx="13" ry="8" fill="#f3a0b7"/>
+      <ellipse cx="120" cy="176" rx="13" ry="8" fill="#f3a0b7"/>
+    </g>);
+  } else { // c = snowman
+    body=(<g>
+      <ellipse cx="100" cy="150" rx="48" ry="42" fill="#ffffff" stroke="#cdd9e6" strokeWidth="3.5"/>
+      <circle cx="100" cy="78" r="36" fill="#ffffff" stroke="#cdd9e6" strokeWidth="3.5"/>
+      <path d="M55 108 q45 16 90 0 l0 10 q-45 14 -90 0z" fill={C.carb}/>
+      <path d="M120 112 l14 4 -3 16 -10 -4z" fill={C.carb}/>
+      <path d="M58 86 l-30 -8 M62 92 l-26 4" stroke="#a36a3a" strokeWidth="3" strokeLinecap="round"/>
+      <path d="M142 86 l30 -8 M138 92 l26 4" stroke="#a36a3a" strokeWidth="3" strokeLinecap="round"/>
+      <circle cx="89" cy="74" r="5" fill="#2b2b2b"/><circle cx="111" cy="74" r="5" fill="#2b2b2b"/>
+      <path d="M100 82 l24 7 -24 7z" fill="#f59e0b" stroke="#d97706" strokeWidth="1.5" strokeLinejoin="round"/>
+      <path d="M92 96 q8 6 16 0" fill="none" stroke="#7a7a7a" strokeWidth="2" strokeLinecap="round"/>
+      <circle cx="100" cy="140" r="4" fill="#2b2b2b"/>
+      <circle cx="100" cy="158" r="4" fill="#2b2b2b"/>
+      <ellipse cx="84" cy="86" rx="7" ry="5" fill="#bfe3f5" opacity="0.7"/>
+      <ellipse cx="116" cy="86" rx="7" ry="5" fill="#bfe3f5" opacity="0.7"/>
+    </g>);
+  }
+  return (
+    <div style={{display:"flex",justifyContent:"center"}}>
+      <svg width={s} height={s} viewBox="0 0 200 200" style={{overflow:"visible"}}>
+        <ellipse cx="100" cy="190" rx="46" ry="9" fill="rgba(0,0,0,0.08)"/>
+        <g style={{animation:"bob 2.8s ease-in-out infinite",transformOrigin:"100px 110px"}}>{body}</g>
+      </svg>
+    </div>
+  );
+}
+
+function Character({allMeals, goals, date}){
+  const st=pickForm(allMeals, goals);
+  const fm=FORMS[st.form];
+  const pct=st.expSpan>0 ? Math.round(st.expInto/st.expSpan*100) : 0;
+  // 選択中の日の傾向（あれば一言）
+  const todayMeals=allMeals[date]||[];
+  let todayLine=null;
+  if(todayMeals.length){
+    const t=todayMeals.reduce((a,m)=>({p:a.p+(m.p||0),f:a.f+(m.f||0),c:a.c+(m.c||0)}),{p:0,f:0,c:0});
+    const tr=[["タンパク質",t.p/(goals.p||1)],["脂質",t.f/(goals.f||1)],["炭水化物",t.c/(goals.c||1)]].sort((a,b)=>b[1]-a[1]);
+    todayLine=`${fmtDate(date)} は ${tr[0][0]} 多めの一日`;
+  }
+  const RatioPill=({l,v,col})=>(
+    <div style={{textAlign:"center",flex:1}}>
+      <div style={{fontSize:11,color:C.sub}}>{l}</div>
+      <div style={{fontSize:15,fontWeight:700,color:col}}>{Math.round(v*100)}%</div>
+    </div>
+  );
+  return (
+    <div className="card" style={{marginBottom:16,textAlign:"center",background:`linear-gradient(180deg,${fm.soft},#ffffff)`,position:"relative",overflow:"hidden"}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:2}}>
+        <span style={{fontSize:12,fontWeight:700,color:fm.color,background:"#fff",borderRadius:8,padding:"3px 9px",boxShadow:"0 1px 2px rgba(0,0,0,.06)"}}>
+          {st.form==="egg" ? "たまご" : `Lv.${st.level}`}
+        </span>
+        <span style={{fontSize:12,color:C.sub}}>記録 {st.loggedDays} 日</span>
+      </div>
+
+      <Mascot form={st.form}/>
+
+      <div style={{fontSize:13,color:fm.color,fontWeight:700,marginTop:2}}>{fm.emoji} {fm.title}</div>
+      <div style={{fontSize:17,fontWeight:800,color:C.ink,marginTop:2}}>{fm.name}</div>
+
+      {st.form!=="egg" && <>
+        <div style={{display:"flex",alignItems:"center",gap:8,margin:"12px 4px 4px"}}>
+          <span style={{fontSize:11,color:C.sub,whiteSpace:"nowrap"}}>つぎのLvまで</span>
+          <div style={{flex:1,height:8,background:"#fff",borderRadius:99,boxShadow:"inset 0 0 0 1px "+C.line}}>
+            <div style={{height:8,width:pct+"%",background:fm.color,borderRadius:99,transition:"width .5s"}}/>
+          </div>
+          <span style={{fontSize:11,color:C.sub,whiteSpace:"nowrap"}}>{st.expInto}/{st.expSpan}日</span>
+        </div>
+      </>}
+
+      <div style={{fontSize:13,color:C.ink,margin:"10px 6px 0",lineHeight:1.5}}>{fm.msg}</div>
+
+      {st.form!=="egg" && <>
+        <div style={{display:"flex",gap:6,margin:"12px 0 2px",background:"#fff",borderRadius:12,padding:"10px 6px",boxShadow:"0 1px 2px rgba(0,0,0,.05)"}}>
+          <RatioPill l="P 直近平均" v={st.ratios.p} col={C.prot}/>
+          <RatioPill l="F 直近平均" v={st.ratios.f} col={C.fat}/>
+          <RatioPill l="C 直近平均" v={st.ratios.c} col={C.carb}/>
+        </div>
+        <div style={{fontSize:10,color:C.sub,marginTop:4}}>※ 直近{st.recentCount}日の平均を目標と比べた割合。突出した栄養で姿が変わります。</div>
+      </>}
+
+      {todayLine && <div style={{fontSize:12,color:fm.color,fontWeight:600,marginTop:8}}>🍽 {todayLine}</div>}
+    </div>
+  );
+}
+
+function HomeTab({meals,goals,allMeals,date,onDelete}){
+  const s=meals.reduce((a,m)=>({kcal:a.kcal+m.kcal,p:a.p+m.p,f:a.f+m.f,c:a.c+m.c}),{kcal:0,p:0,f:0,c:0});
+  return <>
+    <Character allMeals={allMeals} goals={goals} date={date}/>
+    <div className="card" style={{textAlign:"center",marginBottom:16}}>
+      <Ring value={s.kcal} goal={goals.kcal}/>
+      <div style={{color:C.sub,fontSize:14,margin:"6px 0 16px"}}>目標: {goals.kcal} kcal ({Math.round(s.kcal/goals.kcal*100)||0}%)</div>
+      <div style={{textAlign:"left"}}>
+        <Bar label="タンパク質" color={C.prot} value={s.p} goal={goals.p}/>
+        <Bar label="脂質" color={C.fat} value={s.f} goal={goals.f}/>
+        <Bar label="炭水化物" color={C.carb} value={s.c} goal={goals.c}/>
+      </div>
+    </div>
+    <div style={{fontWeight:700,color:C.ink,margin:"4px 4px 12px"}}>今日の食事</div>
+    {!meals.length && <div className="card" style={{textAlign:"center",color:C.sub,fontSize:14}}>まだ記録がありません。「記録」から追加できます。</div>}
+    {meals.map(m=>(
+      <div key={m.id} className="card" style={{marginBottom:10,display:"flex",alignItems:"center",gap:12,padding:14}}>
+        <div style={{width:40,height:40,borderRadius:99,background:C.blueSoft,display:"grid",placeItems:"center"}}>🔥</div>
+        <div style={{flex:1}}><div style={{fontWeight:600,color:C.ink,fontSize:15}}>{m.name}</div>
+          <div style={{fontSize:12,color:C.sub}}>{m.timing} · P{m.p}g F{m.f}g C{m.c}g</div></div>
+        <div style={{fontWeight:700,color:C.kcal}}>{m.kcal} kcal</div>
+        <span onClick={()=>onDelete(m.id)} style={{cursor:"pointer"}}><Icon n="trash" s={18}/></span>
+      </div>
+    ))}
+  </>;
+}
+
+function GraphTab({allMeals,weights,goals}){
+  const [range,setRange]=useState(7);
+  const [dev,setDev]=useState("kcal");
+  const days=[...Array(range)].map((_,i)=>{const d=new Date();d.setDate(d.getDate()-(range-1-i));return d.toISOString().slice(0,10);});
+  const data=days.map(k=>{const ms=allMeals[k]||[];const s=ms.reduce((a,m)=>({kcal:a.kcal+m.kcal,p:a.p+m.p,f:a.f+m.f,c:a.c+m.c}),{kcal:0,p:0,f:0,c:0});return {date:fmtDate(k),logged:ms.length>0,kcal:s.kcal,p:s.p,f:s.f,c:s.c,weight:weights[k]??null};});
+  const logged=data.filter(d=>d.logged);
+  const avg=k=>logged.length?Math.round(logged.reduce((a,d)=>a+d[k],0)/logged.length):0;
+  const Stat=({v,l,color})=><div style={{background:C.bg,borderRadius:12,padding:"14px 0",textAlign:"center"}}><div style={{fontSize:24,fontWeight:700,color}}>{v}</div><div style={{fontSize:12,color:C.sub}}>{l}</div></div>;
+
+  const MI={kcal:{label:"カロリー",color:C.kcal,goal:goals.kcal,unit:"kcal"},p:{label:"タンパク質",color:C.prot,goal:goals.p,unit:"g"},f:{label:"脂質",color:C.fat,goal:goals.f,unit:"g"},c:{label:"炭水化物",color:C.carb,goal:goals.c,unit:"g"}};
+  const mi=MI[dev];
+  const devData=data.map(d=>({date:d.date, dev: d.logged ? d[dev]-mi.goal : null}));
+  const devLogged=devData.filter(x=>x.dev!=null);
+  const avgDev=devLogged.length?Math.round(devLogged.reduce((a,x)=>a+x.dev,0)/devLogged.length):0;
+
+  return <>
+    <div className="card" style={{display:"flex",gap:8,marginBottom:16,padding:6}}>
+      {[7,30,90].map(r=><button key={r} onClick={()=>setRange(r)} style={{flex:1,padding:"8px 0",border:"none",borderRadius:10,cursor:"pointer",fontWeight:600,background:range===r?"#fff":"transparent",color:range===r?C.ink:C.sub,boxShadow:range===r?"0 1px 3px rgba(0,0,0,.1)":"none"}}>{r}日</button>)}
+    </div>
+
+    <div className="card" style={{marginBottom:16,display:"grid",gridTemplateColumns:"1fr 1fr",gap:12}}>
+      <Stat v={avg("kcal")} l="平均kcal" color={C.kcal}/><Stat v={avg("p")+"g"} l="平均P" color={C.prot}/>
+      <Stat v={avg("f")+"g"} l="平均F" color={C.fat}/><Stat v={avg("c")+"g"} l="平均C" color={C.carb}/>
+    </div>
+
+    <div className="card" style={{marginBottom:16}}>
+      <div style={{fontWeight:700,color:C.ink,marginBottom:8}}>カロリー推移（点線＝目安）</div>
+      <Chart data={data} series={[{key:"kcal",color:C.kcal}]} baselines={[{value:goals.kcal,color:C.kcal,label:`目安 ${goals.kcal}`}]}/>
+    </div>
+
+    <div className="card" style={{marginBottom:16}}>
+      <div style={{fontWeight:700,color:C.ink,marginBottom:8}}>PFC推移（点線＝目安）</div>
+      <Chart data={data} series={[{key:"p",color:C.prot},{key:"f",color:C.fat},{key:"c",color:C.carb}]}
+        baselines={[{value:goals.p,color:C.prot},{value:goals.f,color:C.fat},{value:goals.c,color:C.carb}]}/>
+      <div style={{fontSize:12,color:C.sub,display:"flex",gap:14,marginTop:4}}><span style={{color:C.prot}}>● P</span><span style={{color:C.fat}}>● F</span><span style={{color:C.carb}}>● C</span></div>
+    </div>
+
+    <div className="card" style={{marginBottom:16}}>
+      <div style={{fontWeight:700,color:C.ink,marginBottom:10}}>目標との差（波線＝基準値0）</div>
+      <div style={{display:"flex",gap:6,marginBottom:10}}>
+        {Object.keys(MI).map(k=><button key={k} onClick={()=>setDev(k)} style={{flex:1,padding:8,border:"none",borderRadius:8,cursor:"pointer",fontSize:13,fontWeight:600,background:dev===k?MI[k].color:C.bg,color:dev===k?"#fff":C.sub}}>{k==="kcal"?"kcal":k.toUpperCase()}</button>)}
+      </div>
+      <Chart data={devData} series={[{key:"dev",color:mi.color}]} baselines={[{value:0,color:C.sub,label:"基準値"}]}/>
+      <div style={{fontSize:13,color:C.sub,marginTop:6}}>平均の差: <b style={{color:avgDev>=0?C.fat:C.blue}}>{avgDev>=0?"+":""}{avgDev}{mi.unit}</b>（プラス＝目標オーバー / マイナス＝不足）</div>
+    </div>
+
+    <div className="card">
+      <div style={{fontWeight:700,color:C.ink,marginBottom:8}}>体重推移</div>
+      <Chart data={data} series={[{key:"weight",color:C.weight}]}/>
+    </div>
+  </>;
+}
+
+function RecordTab({favorites,onAdd,onRegisterDay,apiKey,model,goto}){
+  const [mode,setMode]=useState("label");
+  const modes=[["manual","手動","pen"],["fav","お気に入り","star"],["paste","貼付け","list"],["label","ラベル","cam"],["ai","AIチャット","bot"]];
+  return <>
+    <div className="card" style={{display:"flex",gap:4,marginBottom:16,padding:6}}>
+      {modes.map(([id,label,icon])=>(
+        <button key={id} onClick={()=>setMode(id)} style={{flex:1,padding:"10px 0",border:"none",borderRadius:10,cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:4,background:mode===id?"#fff":"transparent",boxShadow:mode===id?"0 1px 3px rgba(0,0,0,.1)":"none"}}>
+          <Icon n={icon} c={mode===id?C.blue:C.sub} s={18}/><span style={{fontSize:11,color:mode===id?C.blue:C.sub}}>{label}</span>
+        </button>
+      ))}
+    </div>
+    {mode==="manual" && <ManualForm onAdd={onAdd}/>}
+    {mode==="fav" && <FavPick favorites={favorites} onAdd={onAdd}/>}
+    {mode==="paste" && <PasteMeals onRegisterDay={onRegisterDay}/>}
+    {mode==="label" && <LabelScan onAdd={onAdd} apiKey={apiKey} model={model} goto={goto}/>}
+    {mode==="ai" && <AIChat onAdd={onAdd} apiKey={apiKey} model={model} goto={goto}/>}
+  </>;
+}
+
+function ManualForm({onAdd}){
+  const [f,setF]=useState({name:"",timing:"昼食",kcal:"",p:"",f:"",c:""});
+  const set=k=>e=>setF({...f,[k]:e.target.value});
+  const submit=()=>{ if(!f.name)return; onAdd({name:f.name,timing:f.timing,kcal:+f.kcal||0,p:+f.p||0,f:+f.f||0,c:+f.c||0}); setF({name:"",timing:f.timing,kcal:"",p:"",f:"",c:""}); };
+  return <div className="card">
+    <input placeholder="食品名" value={f.name} onChange={set("name")} style={{marginBottom:10}}/>
+    <select value={f.timing} onChange={set("timing")} style={{marginBottom:10}}>{TIMINGS.map(t=><option key={t}>{t}</option>)}</select>
+    <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:14}}>
+      <input type="number" placeholder="kcal" value={f.kcal} onChange={set("kcal")}/>
+      <input type="number" placeholder="タンパク質 g" value={f.p} onChange={set("p")}/>
+      <input type="number" placeholder="脂質 g" value={f.f} onChange={set("f")}/>
+      <input type="number" placeholder="炭水化物 g" value={f.c} onChange={set("c")}/>
+    </div>
+    <button className="pri" onClick={submit}>記録する</button>
+  </div>;
+}
+
+function FavPick({favorites,onAdd}){
+  const [t,setT]=useState("昼食");
+  if(!favorites.length) return <div className="card" style={{textAlign:"center",color:C.sub,fontSize:14}}>お気に入りがありません。「登録」タブで追加できます。</div>;
+  return <>
+    <div className="card" style={{marginBottom:12,display:"flex",gap:6,padding:6}}>
+      {TIMINGS.map(x=><button key={x} onClick={()=>setT(x)} style={{flex:1,padding:8,border:"none",borderRadius:8,cursor:"pointer",fontSize:13,background:t===x?C.blueSoft:"transparent",color:t===x?C.blue:C.sub}}>{x}</button>)}
+    </div>
+    {favorites.map(f=>(
+      <div key={f.id} className="card" style={{marginBottom:10,display:"flex",alignItems:"center",gap:12}}>
+        <div style={{flex:1}}><div style={{fontWeight:600,color:C.ink}}>{f.name}</div><div style={{fontSize:12,color:C.sub}}>P{f.p}g F{f.f}g C{f.c}g · {f.kcal}kcal</div></div>
+        <button onClick={()=>onAdd({...f,timing:t})} style={{border:"none",background:C.blue,color:"#fff",borderRadius:8,padding:"8px 14px",cursor:"pointer",fontWeight:600}}>追加</button>
+      </div>
+    ))}
+  </>;
+}
+
+function NoKey({goto}){
+  return <div className="card" style={{textAlign:"center"}}>
+    <div style={{color:C.ink,fontWeight:600,marginBottom:6}}>APIキーが未設定です</div>
+    <div style={{color:C.sub,fontSize:13,marginBottom:14}}>AIチャットと写真読み取りには、自分のOpenAI APIキーが必要です。「登録」タブで設定してください。</div>
+    <button className="pri" onClick={goto}>登録タブを開く</button>
+  </div>;
+}
+
+function LabelScan({onAdd,apiKey,model,goto}){
+  const [img,setImg]=useState(null);const [b64,setB64]=useState(null);const [mime,setMime]=useState("image/jpeg");
+  const [loading,setLoading]=useState(false);const [result,setResult]=useState(null);const [err,setErr]=useState(null);
+  const ref=useRef();
+  if(!apiKey) return <NoKey goto={goto}/>;
+  const pick=e=>{const file=e.target.files?.[0];if(!file)return;setMime(file.type);setImg(URL.createObjectURL(file));setResult(null);setErr(null);const r=new FileReader();r.onload=()=>setB64(r.result.split(",")[1]);r.readAsDataURL(file);};
+  const scan=async()=>{ if(!b64)return; setLoading(true);setErr(null);
+    try{
+      const text=await askOpenAI(apiKey,model,[
+        {role:"system",content:"栄養成分表示を読み取るアシスタント。JSONオブジェクトのみ返す。"},
+        {role:"user",content:[
+          {type:"text",text:'この栄養成分表示の写真から1単位あたりの栄養を読み取り、JSONのみ返す: {"name":string,"kcal":number,"p":number,"f":number,"c":number}。pたんぱく質g/f脂質g/c炭水化物g、読めない値は0。'},
+          {type:"image_url",image_url:{url:`data:${mime};base64,${b64}`}}
+        ]}
+      ]);
+      setResult(parseJSON(text));
+    }catch(e){ setErr(e.message||"読み取れませんでした"); }
+    setLoading(false);
+  };
+  return <div className="card">
+    <div style={{fontWeight:700,color:C.ink,marginBottom:12}}>ラベルスキャン</div>
+    <input ref={ref} type="file" accept="image/*" onChange={pick} style={{display:"none"}}/>
+    {!img
+      ? <button onClick={()=>ref.current.click()} style={{width:"100%",padding:32,border:`2px dashed ${C.line}`,borderRadius:12,background:"transparent",cursor:"pointer",display:"flex",flexDirection:"column",alignItems:"center",gap:8,color:C.sub}}><Icon n="img" s={28}/><span>写真を選択</span></button>
+      : <><img src={img} style={{width:"100%",borderRadius:12,marginBottom:12}}/>{!result && <button className="pri" onClick={scan} disabled={loading}>{loading?<span className="spin"/>:"AIで読み取る"}</button>}</>}
+    {err && <div style={{color:C.fat,fontSize:13,marginTop:10}}>{err}</div>}
+    {result && <Confirm result={result} onAdd={onAdd} onReset={()=>{setImg(null);setB64(null);setResult(null);}}/>}
+  </div>;
+}
+
+function AIChat({onAdd,apiKey,model,goto}){
+  const [msgs,setMsgs]=useState([{role:"bot",text:"食べたものを文章で教えてください。例:「鶏むね肉200gと白米一膳」。栄養を推定して記録できます。"}]);
+  const [input,setInput]=useState("");const [loading,setLoading]=useState(false);
+  if(!apiKey) return <NoKey goto={goto}/>;
+  const send=async()=>{ if(!input.trim())return; const q=input.trim();setInput("");setMsgs(m=>[...m,{role:"user",text:q}]);setLoading(true);
+    try{
+      const text=await askOpenAI(apiKey,model,[
+        {role:"system",content:"日本の食事の栄養を推定する栄養士。JSONオブジェクトのみ返す。"},
+        {role:"user",content:`次の食事の栄養を推定。内容:「${q}」。JSONのみ返す: {"name":string,"kcal":number,"p":number,"f":number,"c":number,"comment":string}。commentは一言。`}
+      ]);
+      const r=parseJSON(text); setMsgs(m=>[...m,{role:"bot",text:r.comment||"推定しました。",card:r}]);
+    }catch(e){ setMsgs(m=>[...m,{role:"bot",text:"エラー: "+(e.message||"推定に失敗しました")}]); }
+    setLoading(false);
+  };
+  return <div className="card" style={{display:"flex",flexDirection:"column",height:460,padding:12}}>
+    <div className="scroll" style={{flex:1,overflowY:"auto",display:"flex",flexDirection:"column",gap:10,paddingRight:4}}>
+      {msgs.map((m,i)=>(
+        <div key={i} style={{alignSelf:m.role==="user"?"flex-end":"flex-start",maxWidth:"85%"}}>
+          <div style={{padding:"10px 14px",borderRadius:14,fontSize:14,background:m.role==="user"?C.blue:C.bg,color:m.role==="user"?"#fff":C.ink}}>{m.text}</div>
+          {m.card && <div style={{marginTop:8,background:"#fff",border:`1px solid ${C.line}`,borderRadius:12,padding:12}}>
+            <div style={{fontWeight:600,color:C.ink}}>{m.card.name}</div>
+            <div style={{fontSize:12,color:C.sub,margin:"4px 0 10px"}}>{m.card.kcal}kcal · P{m.card.p} F{m.card.f} C{m.card.c}</div>
+            <Confirm result={m.card} onAdd={onAdd} compact/>
+          </div>}
+        </div>
+      ))}
+      {loading && <div style={{alignSelf:"flex-start"}}><span className="spin" style={{borderColor:C.blue,borderTopColor:"transparent"}}/></div>}
+    </div>
+    <div style={{display:"flex",gap:8,marginTop:10}}>
+      <input value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>e.key==="Enter"&&send()} placeholder="食べたものを入力…"/>
+      <button onClick={send} disabled={loading} style={{border:"none",background:C.blue,borderRadius:10,width:46,minWidth:46,display:"grid",placeItems:"center",cursor:"pointer"}}><Icon n="send" c="#fff" s={18}/></button>
+    </div>
+  </div>;
+}
+
+function Confirm({result,onAdd,onReset,compact}){
+  const [t,setT]=useState("昼食");const [done,setDone]=useState(false);
+  const add=()=>{onAdd({name:result.name,timing:t,kcal:Math.round(result.kcal),p:Math.round(result.p),f:Math.round(result.f),c:Math.round(result.c)});setDone(true);};
+  if(done) return <div style={{color:C.blue,fontWeight:600,fontSize:14,marginTop:compact?0:10}}>✓ 記録しました（{t}）</div>;
+  return <div style={{marginTop:compact?0:12}}>
+    {!compact && <><div style={{fontWeight:600,color:C.ink,marginBottom:4}}>{result.name}</div><div style={{fontSize:13,color:C.sub,marginBottom:10}}>{result.kcal}kcal · P{result.p}g F{result.f}g C{result.c}g</div></>}
+    <div style={{display:"flex",gap:6,marginBottom:10,flexWrap:"wrap"}}>
+      {TIMINGS.map(x=><button key={x} onClick={()=>setT(x)} style={{padding:"6px 12px",border:"none",borderRadius:8,cursor:"pointer",fontSize:13,background:t===x?C.blueSoft:C.bg,color:t===x?C.blue:C.sub}}>{x}</button>)}
+    </div>
+    <div style={{display:"flex",gap:8}}>
+      <button className="pri" onClick={add}>記録する</button>
+      {onReset && <button onClick={onReset} style={{padding:"12px 16px",border:`1px solid ${C.line}`,borderRadius:10,background:"#fff",cursor:"pointer",color:C.sub,whiteSpace:"nowrap"}}>やり直す</button>}
+    </div>
+  </div>;
+}
+
+/* 1日分のログを貼り付け → 食事として分類 */
+function parseDayLog(text){
+  const emoji=/^[\u2600-\u27BF\u2B00-\u2BFF\u{1F000}-\u{1FAFF}\uFE0F]/u;
+  const lines=(text||"").split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+  let timing="昼食", names=[], intotal=false; const meals=[];
+  const dm=(text||"").match(/(\d{1,2})\s*\/\s*(\d{1,2})/);
+  let date=todayKey();
+  if(dm){ const y=new Date().getFullYear(); date=`${y}-${String(+dm[1]).padStart(2,"0")}-${String(+dm[2]).padStart(2,"0")}`; }
+  const isTotal=l=>/合計|摂取量|総カロリー|total/i.test(l);
+  const timingOf=l=>{ if(/朝/.test(l))return "朝食"; if(/昼/.test(l))return "昼食"; if(/夜|夕|晩/.test(l))return "夕食"; if(/酒|間食|おやつ|夜食|デザート|おつまみ/.test(l))return "間食"; return null; };
+  for(const l of lines){
+    if(emoji.test(l)){
+      if(isTotal(l)){ names=[]; intotal=true; continue; }
+      const t=timingOf(l); if(t) timing=t; names=[]; intotal=false; continue;
+    }
+    if(isTotal(l)) continue;
+    if(intotal) continue;
+    if(/^[※*]/.test(l)) continue;
+    const kcalM=l.match(/(\d+(?:\.\d+)?)\s*kcal/i);
+    if(kcalM){
+      const num=re=>{const m=l.match(re);return m?parseFloat(m[1]):0;};
+      meals.push({ timing, name:names.join("、")||"食事", kcal:Math.round(parseFloat(kcalM[1])), p:Math.round(num(/P\s*(\d+(?:\.\d+)?)/i)), f:Math.round(num(/F\s*(\d+(?:\.\d+)?)/i)), c:Math.round(num(/C\s*(\d+(?:\.\d+)?)/i)) });
+      names=[];
+    } else names.push(l);
+  }
+  return {date, meals};
+}
+
+function PasteMeals({onRegisterDay}){
+  const [text,setText]=useState(""); const [parsed,setParsed]=useState(null); const [msg,setMsg]=useState("");
+  const run=()=>{ const r=parseDayLog(text); setParsed(r); setMsg(""); };
+  const commit=()=>{ onRegisterDay(parsed.date, parsed.meals); setMsg(`${parsed.meals.length}件を ${fmtDate(parsed.date)} に登録しました`); setText(""); setParsed(null); };
+  const sum=parsed?parsed.meals.reduce((a,m)=>({kcal:a.kcal+m.kcal,p:a.p+m.p,f:a.f+m.f,c:a.c+m.c}),{kcal:0,p:0,f:0,c:0}):null;
+  return <div className="card">
+    <div style={{fontWeight:700,color:C.ink,marginBottom:6}}>ログを貼り付けて記録</div>
+    <div style={{fontSize:12,color:C.sub,marginBottom:10}}>1日分の食事ログを貼り付け → 解析 → 登録。絵文字の見出し(朝/昼/夜/お酒)で自動分類し、日付(例 6/25)も読み取ります。</div>
+    <textarea rows={6} value={text} onChange={e=>setText(e.target.value)} placeholder={"☀️朝ごはん\n卵とエビサンド（成城石井）\n約360kcal (P16g, F17g, C37g)\n\n🌛夜ごはん\nラーメン\n約940kcal (P43g, F37.5g, C115g)"} style={{marginBottom:10,resize:"vertical"}}/>
+    <button className="pri" onClick={run} disabled={!text.trim()}>解析する</button>
+    {parsed && parsed.meals.length>0 && <div style={{marginTop:12}}>
+      <div style={{fontSize:13,color:C.sub,marginBottom:6}}>登録先の日付: <b style={{color:C.ink}}>{fmtDate(parsed.date)}</b></div>
+      {parsed.meals.map((m,i)=>(
+        <div key={i} style={{display:"flex",alignItems:"center",gap:8,fontSize:13,padding:"7px 0",borderBottom:`1px solid ${C.line}`}}>
+          <span style={{fontSize:11,color:C.blue,background:C.blueSoft,padding:"2px 7px",borderRadius:6,whiteSpace:"nowrap"}}>{m.timing}</span>
+          <span style={{color:C.ink,flex:1}}>{m.name}</span>
+          <span style={{color:C.sub,whiteSpace:"nowrap"}}>{m.kcal}kcal</span>
+        </div>
+      ))}
+      <div style={{fontSize:12,color:C.sub,margin:"8px 0"}}>合計 {sum.kcal}kcal · P{sum.p} F{sum.f} C{sum.c}</div>
+      <button className="pri" onClick={commit}>この{parsed.meals.length}件を記録</button>
+    </div>}
+    {parsed && parsed.meals.length===0 && <div style={{color:C.fat,fontSize:13,marginTop:10}}>食事を読み取れませんでした。各品の行に「○○kcal (P.. F.. C..)」が含まれているか確認してください。</div>}
+    {msg && <div style={{color:C.blue,fontWeight:600,fontSize:14,marginTop:10}}>✓ {msg}</div>}
+  </div>;
+}
+
+/* コピペ1行を {name,kcal,p,f,c} に分類 */
+function parseFavLine(line){
+  const t=(line||"").trim();
+  if(!t) return null;
+  const num=re=>{const m=t.match(re);return m?parseFloat(m[1]):0;};
+  const kcalM=t.match(/(\d+(?:\.\d+)?)\s*kcal/i);
+  const kcal=kcalM?parseFloat(kcalM[1]):0;
+  const p=num(/P\s*(\d+(?:\.\d+)?)/i), f=num(/F\s*(\d+(?:\.\d+)?)/i), c=num(/C\s*(\d+(?:\.\d+)?)/i);
+  let name;
+  if(kcalM) name=t.slice(0,kcalM.index);
+  else { const pm=t.match(/P\s*\d/i); name=pm?t.slice(0,pm.index):t; }
+  name=name.replace(/[\/\-・\s]+$/,"").trim()||"名称未設定";
+  return {name,kcal:Math.round(kcal),p:Math.round(p),f:Math.round(f),c:Math.round(c)};
+}
+
+function BulkAdd({onAddFav}){
+  const [text,setText]=useState("");const [parsed,setParsed]=useState(null);const [msg,setMsg]=useState("");
+  const run=()=>{ const items=text.split(/\n/).map(parseFavLine).filter(Boolean); setParsed(items); setMsg(""); };
+  const commit=()=>{ parsed.forEach(onAddFav); setMsg(`${parsed.length}件を登録しました`); setText(""); setParsed(null); };
+  return <div className="card" style={{marginBottom:16}}>
+    <div style={{fontWeight:700,color:C.ink,marginBottom:6}}>まとめて登録（コピペ）</div>
+    <div style={{fontSize:12,color:C.sub,marginBottom:10}}>1行に1品で貼り付け → 解析 → 登録。例: 味噌汁(お椀一杯) 40kcal / P3 F1 C5</div>
+    <textarea rows={4} value={text} onChange={e=>setText(e.target.value)} placeholder={"味噌汁(お椀一杯) 40kcal / P3 F1 C5\n焼き鮭(1切れ80g) 133kcal / P18 F6 C0"} style={{marginBottom:10,resize:"vertical"}}/>
+    <button className="pri" onClick={run} disabled={!text.trim()}>解析する</button>
+    {parsed && parsed.length>0 && <div style={{marginTop:12}}>
+      {parsed.map((x,i)=>(
+        <div key={i} style={{display:"flex",justifyContent:"space-between",alignItems:"center",fontSize:13,padding:"7px 0",borderBottom:`1px solid ${C.line}`}}>
+          <span style={{color:C.ink,flex:1}}>{x.name}</span>
+          <span style={{color:C.sub,whiteSpace:"nowrap"}}>{x.kcal}kcal · <span style={{color:C.kcal}}> </span>P{x.p} F{x.f} C{x.c}</span>
+        </div>
+      ))}
+      <div style={{fontSize:12,color:C.sub,margin:"8px 0"}}>内容を確認して登録してください（数値がずれていれば貼り直し→解析）。</div>
+      <button className="pri" onClick={commit}>この{parsed.length}件を登録</button>
+    </div>}
+    {parsed && parsed.length===0 && <div style={{color:C.fat,fontSize:13,marginTop:10}}>解析できませんでした。1行に1品で貼り付けてください。</div>}
+    {msg && <div style={{color:C.blue,fontWeight:600,fontSize:14,marginTop:10}}>✓ {msg}</div>}
+  </div>;
+}
+
+/* ---- バックアップ（書き出し/読み込み） ---- */
+function exportData(){
+  const data={ app:"PFC Log", version:1, exportedAt:new Date().toISOString(),
+    allMeals:LS.get("allMeals",{}), favorites:LS.get("favorites",[]), goals:LS.get("goals",{}), weights:LS.get("weights",{}), model:LS.get("model","gpt-4o") };
+  const blob=new Blob([JSON.stringify(data,null,2)],{type:"application/json"});
+  const url=URL.createObjectURL(blob); const a=document.createElement("a");
+  a.href=url; a.download=`pfclog-backup-${todayKey()}.json`; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+}
+function importData(file,onDone){
+  const r=new FileReader();
+  r.onload=()=>{ try{ const d=JSON.parse(r.result);
+    if(d.allMeals) LS.set("allMeals",d.allMeals);
+    if(d.favorites) LS.set("favorites",d.favorites);
+    if(d.goals) LS.set("goals",d.goals);
+    if(d.weights) LS.set("weights",d.weights);
+    if(d.model) LS.set("model",d.model);
+    onDone(true);
+  }catch{ onDone(false); } };
+  r.readAsText(file);
+}
+function Backup(){
+  const ref=useRef(); const [msg,setMsg]=useState("");
+  const onFile=e=>{ const f=e.target.files?.[0]; if(!f) return;
+    if(!window.confirm("現在の記録に、ファイルの内容を上書きします。よろしいですか？")){ e.target.value=""; return; }
+    importData(f,ok=>{ if(ok){ setMsg("✓ 読み込みました。画面を更新します…"); setTimeout(()=>location.reload(),900); } else setMsg("ファイルを読み込めませんでした"); });
+  };
+  return <div className="card" style={{marginBottom:16}}>
+    <div style={{fontWeight:700,color:C.ink,marginBottom:6}}>バックアップ</div>
+    <div style={{fontSize:12,color:C.sub,marginBottom:12}}>記録・お気に入り・目標・体重をファイルに保存／復元します（APIキーは含まれません）。機種変更や、データが消えたときの備えに。</div>
+    <button className="pri" onClick={exportData} style={{marginBottom:10}}>書き出し（ファイル保存）</button>
+    <input ref={ref} type="file" accept="application/json,.json" onChange={onFile} style={{display:"none"}}/>
+    <button onClick={()=>ref.current.click()} style={{width:"100%",padding:13,border:`1px solid ${C.blue}`,borderRadius:10,background:"#fff",color:C.blue,fontWeight:700,cursor:"pointer"}}>読み込み（復元）</button>
+    {msg && <div style={{color:C.blue,fontWeight:600,fontSize:14,marginTop:10}}>{msg}</div>}
+  </div>;
+}
+
+function RegisterTab({favorites,goals,weights,date,apiKey,model,onAddFav,onDelFav,onSaveGoals,onSaveWeight,onSaveKey,onSaveModel}){
+  const [g,setG]=useState(goals);const [w,setW]=useState(weights[date]||"");
+  useEffect(()=>{ setW(weights[date]||""); },[date,weights]);
+  const [f,setF]=useState({name:"",kcal:"",p:"",f:"",c:""});const [k,setK]=useState(apiKey);const [md,setMd]=useState(model);const [saved,setSaved]=useState(false);const [gsaved,setGsaved]=useState(false);
+  return <>
+    <div className="card" style={{marginBottom:16}}>
+      <div style={{fontWeight:700,color:C.ink,marginBottom:12}}>目標（基準値）設定</div>
+      <div style={{fontSize:12,color:C.sub,marginBottom:10}}>ここで決めた値が、グラフの波線（基準）として表示されます。</div>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
+        {[["kcal","カロリー (kcal)",C.kcal],["p","タンパク質 P(g)",C.prot],["f","脂質 F(g)",C.fat],["c","炭水化物 C(g)",C.carb]].map(([key,l,col])=>(
+          <div key={key}><div style={{fontSize:12,color:col,marginBottom:4,fontWeight:600}}>{l}</div><input type="number" value={g[key]} onChange={e=>setG({...g,[key]:+e.target.value})}/></div>
+        ))}
+      </div>
+      <button className="pri" onClick={()=>{onSaveGoals(g);setGsaved(true);setTimeout(()=>setGsaved(false),1500);}}>{gsaved?"✓ 保存しました":"目標を保存"}</button>
+    </div>
+
+    <div className="card" style={{marginBottom:16}}>
+      <div style={{fontWeight:700,color:C.ink,marginBottom:12}}>{fmtDate(date)} の体重 (kg)</div>
+      <div style={{display:"flex",gap:8}}>
+        <input type="number" value={w} onChange={e=>setW(e.target.value)} placeholder="73.8"/>
+        <button onClick={()=>onSaveWeight(date,+w)} style={{border:"none",background:C.blue,color:"#fff",borderRadius:10,padding:"0 18px",cursor:"pointer",fontWeight:600,whiteSpace:"nowrap"}}>保存</button>
+      </div>
+    </div>
+
+    <div className="card" style={{marginBottom:16}}>
+      <div style={{fontWeight:700,color:C.ink,marginBottom:6}}>APIキー（AI機能用 / OpenAI）</div>
+      <div style={{fontSize:12,color:C.sub,marginBottom:10}}>OpenAIのキー（sk-…）。この端末内にのみ保存され、外部には送られません。</div>
+      <input type="password" placeholder="sk-..." value={k} onChange={e=>setK(e.target.value)} style={{marginBottom:10}}/>
+      <div style={{fontSize:12,color:C.sub,marginBottom:6}}>モデル（画像を読むなら gpt-4o 推奨）</div>
+      <input placeholder="gpt-4o" value={md} onChange={e=>setMd(e.target.value)} style={{marginBottom:10}}/>
+      <button className="pri" onClick={()=>{onSaveKey(k.trim());onSaveModel(md.trim()||"gpt-4o");setSaved(true);setTimeout(()=>setSaved(false),1500);}}>{saved?"✓ 保存しました":"保存する"}</button>
+      <div style={{fontSize:12,color:C.sub,marginTop:8}}>キー取得: platform.openai.com → API keys</div>
+    </div>
+
+    <Backup/>
+
+    <BulkAdd onAddFav={onAddFav}/>
+
+    <div className="card" style={{marginBottom:16}}>
+      <div style={{fontWeight:700,color:C.ink,marginBottom:12}}>お気に入りを追加</div>
+      <input placeholder="食品名" value={f.name} onChange={e=>setF({...f,name:e.target.value})} style={{marginBottom:10}}/>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr",gap:10,marginBottom:12}}>
+        {[["kcal","kcal"],["p","P g"],["f","F g"],["c","C g"]].map(([key,l])=><input key={key} type="number" placeholder={l} value={f[key]} onChange={e=>setF({...f,[key]:e.target.value})}/>)}
+      </div>
+      <button className="pri" onClick={()=>{if(f.name){onAddFav({name:f.name,kcal:+f.kcal||0,p:+f.p||0,f:+f.f||0,c:+f.c||0});setF({name:"",kcal:"",p:"",f:"",c:""});}}}>登録する</button>
+    </div>
+
+    {favorites.map(x=>(
+      <div key={x.id} className="card" style={{marginBottom:10,display:"flex",alignItems:"center"}}>
+        <div style={{flex:1}}><div style={{fontWeight:600,color:C.ink}}>{x.name}</div><div style={{fontSize:12,color:C.sub}}>{x.kcal}kcal · P{x.p} F{x.f} C{x.c}</div></div>
+        <span onClick={()=>onDelFav(x.id)} style={{cursor:"pointer"}}><Icon n="trash" s={18}/></span>
+      </div>
+    ))}
+  </>;
+}
+
+function HistoryTab({allMeals}){
+  const keys=Object.keys(allMeals).filter(k=>(allMeals[k]||[]).length).sort().reverse();
+  if(!keys.length) return <div className="card" style={{textAlign:"center",color:C.sub,fontSize:14}}>記録の履歴がありません。</div>;
+  return keys.map(k=>{const ms=allMeals[k];const kcal=ms.reduce((a,m)=>a+m.kcal,0);
+    return <div key={k} className="card" style={{marginBottom:12}}>
+      <div style={{display:"flex",justifyContent:"space-between",marginBottom:10}}><span style={{fontWeight:700,color:C.ink}}>{fmtDate(k)}</span><span style={{fontWeight:700,color:C.kcal}}>{kcal} kcal</span></div>
+      {ms.map(m=><div key={m.id} style={{display:"flex",justifyContent:"space-between",fontSize:13,color:C.sub,padding:"4px 0"}}><span>{m.name} <span style={{fontSize:11}}>({m.timing})</span></span><span>{m.kcal}kcal</span></div>)}
+    </div>;
+  });
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
