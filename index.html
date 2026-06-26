@@ -185,6 +185,23 @@ function DateBar({date,setDate}){
 }
 
 /* ================= APP ================= */
+/* 画面内エラーを握りつぶさず表示する（欄が黙って消えるのを防ぐ） */
+class ErrorBoundary extends React.Component{
+  constructor(p){ super(p); this.state={err:null}; }
+  static getDerivedStateFromError(err){ return {err}; }
+  componentDidCatch(err,info){ console.error(err,info); }
+  render(){
+    if(this.state.err) return (
+      <div className="card" style={{margin:0,border:"1px solid #fecaca",background:"#fef2f2"}}>
+        <div style={{fontWeight:700,color:"#b91c1c",marginBottom:6}}>表示中にエラーが発生しました</div>
+        <div style={{fontSize:12,color:"#7f1d1d",whiteSpace:"pre-wrap",wordBreak:"break-word",marginBottom:10}}>{String((this.state.err&&this.state.err.message)||this.state.err)}</div>
+        <button className="pri" onClick={()=>this.setState({err:null})}>再表示</button>
+      </div>
+    );
+    return this.props.children;
+  }
+}
+
 function App(){
   const [tab,setTab]=useState("home");
   const [date,setDate]=useState(todayKey());
@@ -200,6 +217,9 @@ function App(){
   const addMeal=(m)=>persistMeals([...meals,{id:uid(),...m}]);
   const addMealsToDate=(dk,items)=>{ const a={...allMeals}; const cur=a[dk]?[...a[dk]]:[]; items.forEach(m=>cur.push({id:uid(),...m})); a[dk]=cur; setAllMeals(a); LS.set("allMeals",a); };
   const delMeal=(id)=>persistMeals(meals.filter(x=>x.id!==id));
+  const updateMealAt=(dk,id,patch)=>{ const a={...allMeals}; a[dk]=(a[dk]||[]).map(m=>m.id===id?{...m,...patch}:m); setAllMeals(a); LS.set("allMeals",a); };
+  const delMealAt=(dk,id)=>{ const a={...allMeals}; a[dk]=(a[dk]||[]).filter(m=>m.id!==id); if(!a[dk].length) delete a[dk]; setAllMeals(a); LS.set("allMeals",a); };
+  const delDay=(dk)=>{ const a={...allMeals}; delete a[dk]; setAllMeals(a); LS.set("allMeals",a); };
   const addFav=(f)=>{const n=[...favorites,{id:uid(),...f}];setFavorites(n);LS.set("favorites",n);};
   const delFav=(id)=>{const n=favorites.filter(x=>x.id!==id);setFavorites(n);LS.set("favorites",n);};
   const saveGoals=(g)=>{setGoals(g);LS.set("goals",g);};
@@ -217,12 +237,14 @@ function App(){
       </div>
 
       <div className="scroll" style={{flex:1,overflowY:"auto",padding:16,paddingBottom:90}}>
+        <ErrorBoundary key={tab}>
         {tab==="home" && <HomeTab meals={meals} goals={goals} allMeals={allMeals} date={date} onDelete={delMeal}/>}
         {tab==="graph" && <GraphTab allMeals={allMeals} weights={weights} goals={goals}/>}
         {tab==="record" && <RecordTab favorites={favorites} onAdd={addMeal} onRegisterDay={addMealsToDate} date={date} apiKey={apiKey} model={model} goto={()=>setTab("register")}/>}
         {tab==="register" && <RegisterTab favorites={favorites} goals={goals} weights={weights} date={date} apiKey={apiKey} model={model}
             onAddFav={addFav} onDelFav={delFav} onSaveGoals={saveGoals} onSaveWeight={saveWeight} onSaveKey={saveKey} onSaveModel={saveModel}/>}
-        {tab==="history" && <HistoryTab allMeals={allMeals}/>}
+        {tab==="history" && <HistoryTab allMeals={allMeals} onEdit={updateMealAt} onDelete={delMealAt} onDelDay={delDay}/>}
+        </ErrorBoundary>
       </div>
 
       <div style={{position:"fixed",bottom:0,left:0,right:0,maxWidth:440,margin:"0 auto",display:"flex",justifyContent:"space-around",alignItems:"center",padding:"8px 0 16px",background:"#fff",borderTop:`1px solid ${C.line}`}}>
@@ -501,7 +523,7 @@ function GraphTab({allMeals,weights,goals}){
 }
 
 function RecordTab({favorites,onAdd,onRegisterDay,date,apiKey,model,goto}){
-  const [mode,setMode]=useState("label");
+  const [mode,setMode]=useState("paste");
   const modes=[["manual","手動","pen"],["fav","お気に入り","star"],["paste","貼付け","list"],["label","ラベル","cam"],["ai","AIチャット","bot"]];
   return <>
     <div className="card" style={{display:"flex",gap:4,marginBottom:16,padding:6}}>
@@ -694,21 +716,28 @@ function parseDayLog(text){
 }
 
 function PasteMeals({onRegisterDay, defaultDate}){
-  const [text,setText]=useState(""); const [parsed,setParsed]=useState(null); const [target,setTarget]=useState(defaultDate||todayKey()); const [detected,setDetected]=useState(false); const [msg,setMsg]=useState("");
-  const run=()=>{ const r=parseDayLog(text); setParsed(r); setDetected(!!r.date); setTarget(r.date||defaultDate||todayKey()); setMsg(""); };
-  const commit=()=>{ onRegisterDay(target, parsed.meals); setMsg(`${parsed.meals.length}件を ${fmtDateW(target)} に登録しました`); setText(""); setParsed(null); };
+  const [text,setText]=useState(""); const [parsed,setParsed]=useState(null);
+  const [target,setTarget]=useState(defaultDate||todayKey()); const [detected,setDetected]=useState(null); const [msg,setMsg]=useState("");
+  useEffect(()=>{ if(!detected) setTarget(defaultDate||todayKey()); },[defaultDate]);
+  const run=()=>{ const r=parseDayLog(text); setParsed(r); setMsg(""); if(r.date){ setDetected(r.date); setTarget(r.date); } else setDetected(null); };
+  const commit=()=>{ onRegisterDay(target, parsed.meals); setMsg(`${parsed.meals.length}件を ${fmtDateW(target)} に登録しました`); setText(""); setParsed(null); setDetected(null); };
   const sum=parsed?parsed.meals.reduce((a,m)=>({kcal:a.kcal+m.kcal,p:a.p+m.p,f:a.f+m.f,c:a.c+m.c}),{kcal:0,p:0,f:0,c:0}):null;
   return <div className="card">
     <div style={{fontWeight:700,color:C.ink,marginBottom:6}}>ログを貼り付けて記録</div>
-    <div style={{fontSize:12,color:C.sub,marginBottom:10}}>1日分の食事ログを貼り付け → 解析 → 登録。絵文字の見出し(朝/昼/夜/お酒)で自動分類します。日付は読み取りを試みますが、登録前にいつでも変更できます。</div>
+    <div style={{fontSize:12,color:C.sub,marginBottom:12}}>1日分の食事ログを貼り付け → 解析 → 登録。絵文字の見出し(朝/昼/夜/お酒)で自動分類します。</div>
+
+    <div style={{background:C.bg,borderRadius:12,padding:"10px 12px",marginBottom:12}}>
+      <div style={{fontSize:13,fontWeight:600,color:C.ink,marginBottom:6}}>📅 登録先の日付</div>
+      <input type="date" value={target} max={todayKey()} onChange={e=>{ if(e.target.value){ setTarget(e.target.value); setDetected(null); } }} style={{padding:"10px 12px"}}/>
+      <div style={{fontSize:11,color:C.sub,marginTop:6}}>
+        {detected ? `ログから ${fmtDate(detected)} を検出してセットしました。違うときは上で変更できます。` : "ここで先に選べます。ログに日付があれば解析時に自動セットします。"}
+      </div>
+    </div>
+
     <textarea rows={6} value={text} onChange={e=>setText(e.target.value)} placeholder={"☀️朝ごはん\n卵とエビサンド（成城石井）\n約360kcal (P16g, F17g, C37g)\n\n🌛夜ごはん\nラーメン\n約940kcal (P43g, F37.5g, C115g)"} style={{marginBottom:10,resize:"vertical"}}/>
     <button className="pri" onClick={run} disabled={!text.trim()}>解析する</button>
+
     {parsed && parsed.meals.length>0 && <div style={{marginTop:12}}>
-      <div style={{background:C.bg,borderRadius:12,padding:"10px 12px",marginBottom:10}}>
-        <div style={{fontSize:13,color:C.ink,fontWeight:600,marginBottom:6}}>登録先の日付</div>
-        <input type="date" value={target} max={todayKey()} onChange={e=>e.target.value&&setTarget(e.target.value)} style={{padding:"10px 12px"}}/>
-        <div style={{fontSize:11,color:C.sub,marginTop:6}}>{detected ? `ログから ${fmtDate(parsed.date)} を検出しました。違う場合は上で変更できます。` : "ログから日付が読み取れませんでした。選択中の日付にしています。必要なら変更してください。"}</div>
-      </div>
       {parsed.meals.map((m,i)=>(
         <div key={i} style={{display:"flex",alignItems:"center",gap:8,fontSize:13,padding:"7px 0",borderBottom:`1px solid ${C.line}`}}>
           <span style={{fontSize:11,color:C.blue,background:C.blueSoft,padding:"2px 7px",borderRadius:6,whiteSpace:"nowrap"}}>{m.timing}</span>
@@ -800,8 +829,12 @@ function Backup(){
 }
 
 function RegisterTab({favorites,goals,weights,date,apiKey,model,onAddFav,onDelFav,onSaveGoals,onSaveWeight,onSaveKey,onSaveModel}){
-  const [g,setG]=useState(goals);const [w,setW]=useState(weights[date]||"");
-  useEffect(()=>{ setW(weights[date]||""); },[date,weights]);
+  const [g,setG]=useState(goals);
+  const [wDate,setWDate]=useState(date);
+  const [w,setW]=useState(weights[date]||"");
+  const [wMsg,setWMsg]=useState("");
+  useEffect(()=>{ setWDate(date); },[date]);
+  useEffect(()=>{ setW(weights[wDate]||""); setWMsg(""); },[wDate,weights]);
   const [f,setF]=useState({name:"",kcal:"",p:"",f:"",c:""});const [k,setK]=useState(apiKey);const [md,setMd]=useState(model);const [saved,setSaved]=useState(false);const [gsaved,setGsaved]=useState(false);
   return <>
     <div className="card" style={{marginBottom:16}}>
@@ -816,11 +849,17 @@ function RegisterTab({favorites,goals,weights,date,apiKey,model,onAddFav,onDelFa
     </div>
 
     <div className="card" style={{marginBottom:16}}>
-      <div style={{fontWeight:700,color:C.ink,marginBottom:12}}>{fmtDate(date)} の体重 (kg)</div>
-      <div style={{display:"flex",gap:8}}>
-        <input type="number" value={w} onChange={e=>setW(e.target.value)} placeholder="73.8"/>
-        <button onClick={()=>onSaveWeight(date,+w)} style={{border:"none",background:C.blue,color:"#fff",borderRadius:10,padding:"0 18px",cursor:"pointer",fontWeight:600,whiteSpace:"nowrap"}}>保存</button>
+      <div style={{fontWeight:700,color:C.ink,marginBottom:12}}>体重を記録 (kg)</div>
+      <div style={{background:C.bg,borderRadius:12,padding:"10px 12px",marginBottom:10}}>
+        <div style={{fontSize:13,fontWeight:600,color:C.ink,marginBottom:6}}>📅 記録する日</div>
+        <input type="date" value={wDate} max={todayKey()} onChange={e=>e.target.value&&setWDate(e.target.value)} style={{padding:"10px 12px"}}/>
       </div>
+      <div style={{display:"flex",gap:8}}>
+        <input type="number" value={w} onChange={e=>setW(e.target.value)} placeholder="50"/>
+        <button onClick={()=>{ if(w!=="") { onSaveWeight(wDate,+w); setWMsg(`${fmtDate(wDate)} に ${+w}kg を保存しました`); setTimeout(()=>setWMsg(""),2000); } }} style={{border:"none",background:C.blue,color:"#fff",borderRadius:10,padding:"0 18px",cursor:"pointer",fontWeight:600,whiteSpace:"nowrap"}}>保存</button>
+      </div>
+      {wMsg ? <div style={{fontSize:12,color:C.blue,fontWeight:600,marginTop:8}}>✓ {wMsg}</div>
+            : (weights[wDate]!=null && <div style={{fontSize:11,color:C.sub,marginTop:8}}>現在の登録: {fmtDate(wDate)} = {weights[wDate]}kg</div>)}
     </div>
 
     <div className="card" style={{marginBottom:16}}>
@@ -856,15 +895,53 @@ function RegisterTab({favorites,goals,weights,date,apiKey,model,onAddFav,onDelFa
   </>;
 }
 
-function HistoryTab({allMeals}){
+/* 履歴の1食：表示／インライン編集／削除 */
+function HistMeal({dk,m,onEdit,onDelete}){
+  const [ed,setEd]=useState(false);
+  const [f,setF]=useState(m);
+  useEffect(()=>{ setF(m); },[m]);
+  if(ed){
+    return <div style={{padding:"10px 0",borderBottom:`1px solid ${C.line}`}}>
+      <input value={f.name} onChange={e=>setF({...f,name:e.target.value})} placeholder="食品名" style={{marginBottom:6}}/>
+      <select value={f.timing} onChange={e=>setF({...f,timing:e.target.value})} style={{marginBottom:6}}>{TIMINGS.map(t=><option key={t}>{t}</option>)}</select>
+      <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:6,marginBottom:8}}>
+        <input type="number" value={f.kcal} onChange={e=>setF({...f,kcal:e.target.value})} placeholder="kcal"/>
+        <input type="number" value={f.p} onChange={e=>setF({...f,p:e.target.value})} placeholder="P"/>
+        <input type="number" value={f.f} onChange={e=>setF({...f,f:e.target.value})} placeholder="F"/>
+        <input type="number" value={f.c} onChange={e=>setF({...f,c:e.target.value})} placeholder="C"/>
+      </div>
+      <div style={{display:"flex",gap:8}}>
+        <button className="pri" onClick={()=>{ onEdit(dk,m.id,{name:f.name||"食事",timing:f.timing,kcal:+f.kcal||0,p:+f.p||0,f:+f.f||0,c:+f.c||0}); setEd(false); }}>保存</button>
+        <button onClick={()=>{ setF(m); setEd(false); }} style={{flex:0,background:"#fff",border:`1px solid ${C.line}`,color:C.sub,borderRadius:10,padding:"0 16px",cursor:"pointer"}}>キャンセル</button>
+      </div>
+    </div>;
+  }
+  return <div style={{display:"flex",alignItems:"center",gap:8,fontSize:13,padding:"7px 0",borderBottom:`1px solid ${C.line}`}}>
+    <span style={{flex:1,color:C.ink}}>{m.name} <span style={{fontSize:11,color:C.sub}}>({m.timing})</span><div style={{fontSize:11,color:C.sub}}>P{m.p} F{m.f} C{m.c}</div></span>
+    <span style={{color:C.sub,whiteSpace:"nowrap"}}>{m.kcal}kcal</span>
+    <span onClick={()=>setEd(true)} style={{cursor:"pointer"}}><Icon n="pen" s={16} c={C.blue}/></span>
+    <span onClick={()=>onDelete(dk,m.id)} style={{cursor:"pointer"}}><Icon n="trash" s={16}/></span>
+  </div>;
+}
+
+function HistoryTab({allMeals,onEdit,onDelete,onDelDay}){
   const keys=Object.keys(allMeals).filter(k=>(allMeals[k]||[]).length).sort().reverse();
   if(!keys.length) return <div className="card" style={{textAlign:"center",color:C.sub,fontSize:14}}>記録の履歴がありません。</div>;
-  return keys.map(k=>{const ms=allMeals[k];const kcal=ms.reduce((a,m)=>a+m.kcal,0);
-    return <div key={k} className="card" style={{marginBottom:12}}>
-      <div style={{display:"flex",justifyContent:"space-between",marginBottom:10}}><span style={{fontWeight:700,color:C.ink}}>{fmtDate(k)}</span><span style={{fontWeight:700,color:C.kcal}}>{kcal} kcal</span></div>
-      {ms.map(m=><div key={m.id} style={{display:"flex",justifyContent:"space-between",fontSize:13,color:C.sub,padding:"4px 0"}}><span>{m.name} <span style={{fontSize:11}}>({m.timing})</span></span><span>{m.kcal}kcal</span></div>)}
-    </div>;
-  });
+  return <>
+    <div style={{fontSize:12,color:C.sub,marginBottom:10}}>各項目の ✏️ で修正、🗑 で削除。右上「この日を削除」で1日分まとめて削除できます。</div>
+    {keys.map(k=>{const ms=allMeals[k];const kcal=ms.reduce((a,m)=>a+m.kcal,0);
+      return <div key={k} className="card" style={{marginBottom:12}}>
+        <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+          <span style={{fontWeight:700,color:C.ink}}>{fmtDateW(k)}</span>
+          <span style={{display:"flex",alignItems:"center",gap:12}}>
+            <span style={{fontWeight:700,color:C.kcal}}>{kcal} kcal</span>
+            <button onClick={()=>{ if(window.confirm(`${fmtDate(k)} の記録（${ms.length}件）をすべて削除しますか？`)) onDelDay(k); }} style={{border:"none",background:"transparent",color:C.fat,fontSize:11,cursor:"pointer",fontWeight:600,padding:0}}>この日を削除</button>
+          </span>
+        </div>
+        {ms.map(m=><HistMeal key={m.id} dk={k} m={m} onEdit={onEdit} onDelete={onDelete}/>)}
+      </div>;
+    })}
+  </>;
 }
 
 ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
