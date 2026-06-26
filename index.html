@@ -256,29 +256,6 @@ const FORMS = {
 };
 
 /* 直近の食事傾向から「フォーム」を、累計記録日数から「レベル」を決める */
-function pickForm(allMeals, goals){
-  const dates=Object.keys(allMeals).filter(k=>(allMeals[k]||[]).length>0).sort();
-  const loggedDays=dates.length;
-  const recent=dates.slice(-7);
-  let P=0,F=0,Cb=0;
-  recent.forEach(k=>(allMeals[k]||[]).forEach(m=>{P+=m.p||0;F+=m.f||0;Cb+=m.c||0;}));
-  const n=recent.length||1;
-  const avg={p:P/n,f:F/n,c:Cb/n};
-  const gp=goals.p||1, gf=goals.f||1, gc=goals.c||1;
-  const r={p:avg.p/gp, f:avg.f/gf, c:avg.c/gc};
-  let form="egg";
-  if(loggedDays>0 && (avg.p+avg.f+avg.c)>0){
-    const arr=[["p",r.p],["f",r.f],["c",r.c]].sort((a,b)=>b[1]-a[1]);
-    const top=arr[0], othersAvg=(arr[1][1]+arr[2][1])/2;
-    if(top[1]-othersAvg<0.22 || top[1]<othersAvg*1.18) form="balance";
-    else form=top[0];
-  }
-  const exp=loggedDays;
-  const level=Math.floor((1+Math.sqrt(1+8*exp))/2);
-  const curBase=(level-1)*level/2, nextBase=level*(level+1)/2;
-  return {form, loggedDays, level, expInto:exp-curBase, expSpan:nextBase-curBase, avg, ratios:r, recentCount:recent.length};
-}
-
 /* フォームごとに姿が変わるSVGマスコット */
 function Mascot({form, s=180}){
   const eye=(cx,cy,r=7)=>(<g><circle cx={cx} cy={cy} r={r} fill="#3a2d22"/><circle cx={cx-2} cy={cy-2.5} r={r*0.32} fill="#fff"/></g>);
@@ -364,60 +341,80 @@ function Mascot({form, s=180}){
   );
 }
 
-function Character({allMeals, goals, date}){
-  const st=pickForm(allMeals, goals);
-  const fm=FORMS[st.form];
-  const pct=st.expSpan>0 ? Math.round(st.expInto/st.expSpan*100) : 0;
-  // 選択中の日の傾向（あれば一言）
-  const todayMeals=allMeals[date]||[];
-  let todayLine=null;
-  if(todayMeals.length){
-    const t=todayMeals.reduce((a,m)=>({p:a.p+(m.p||0),f:a.f+(m.f||0),c:a.c+(m.c||0)}),{p:0,f:0,c:0});
-    const tr=[["タンパク質",t.p/(goals.p||1)],["脂質",t.f/(goals.f||1)],["炭水化物",t.c/(goals.c||1)]].sort((a,b)=>b[1]-a[1]);
-    todayLine=`${fmtDate(date)} は ${tr[0][0]} 多めの一日`;
+/* 選択中の日の食事から、姿（フォーム）とカロリー状態を決める */
+function dayState(meals, goals){
+  const t=meals.reduce((a,m)=>({p:a.p+(m.p||0),f:a.f+(m.f||0),c:a.c+(m.c||0),kcal:a.kcal+(m.kcal||0)}),{p:0,f:0,c:0,kcal:0});
+  const total=t.p+t.f+t.c;
+  let form="empty";
+  if(total>0){
+    const gtot=(goals.p||0)+(goals.f||0)+(goals.c||0)||1;
+    const gs={p:(goals.p||0)/gtot, f:(goals.f||0)/gtot, c:(goals.c||0)/gtot};
+    const sh={p:t.p/total, f:t.f/total, c:t.c/total};
+    const over=[["p",sh.p-gs.p],["f",sh.f-gs.f],["c",sh.c-gs.c]].sort((a,b)=>b[1]-a[1]);
+    form = over[0][1] < 0.08 ? "balance" : over[0][0];  // 構成比が目標どおりならバランス、偏れば該当フォーム
   }
-  const RatioPill=({l,v,col})=>(
-    <div style={{textAlign:"center",flex:1}}>
-      <div style={{fontSize:11,color:C.sub}}>{l}</div>
-      <div style={{fontSize:15,fontWeight:700,color:col}}>{Math.round(v*100)}%</div>
-    </div>
-  );
+  const kr = goals.kcal ? t.kcal/goals.kcal : 0;
+  const cond = total===0 ? "none" : (kr>1.3 ? "over" : (kr<0.55 ? "under" : "good"));
+  return {t, total, form, cond};
+}
+
+function Character({allMeals, goals, date}){
+  const meals = allMeals[date] || [];
+  const loggedDays = Object.keys(allMeals).filter(k=>(allMeals[k]||[]).length>0).length;
+  const exp=loggedDays, level=Math.floor((1+Math.sqrt(1+8*exp))/2);
+  const curBase=(level-1)*level/2, nextBase=level*(level+1)/2;
+  const expInto=exp-curBase, expSpan=nextBase-curBase;
+  const pct=expSpan>0 ? Math.round(expInto/expSpan*100) : 0;
+
+  const d = dayState(meals, goals);
+  const isEgg = d.total===0;
+  const fm = isEgg ? FORMS.egg : FORMS[d.form];
+  const visual = isEgg ? "egg" : d.form;
+
+  let title, name, msg;
+  if(isEgg){
+    if(loggedDays===0){ title="たまご期"; name="たまご"; msg="ごはんを記録すると、たまごからペコまるが生まれて育っていくよ。"; }
+    else { title="おなかぺこぺこ"; name="ねむりペコまる"; msg=`${fmtDate(date)} はまだ記録がないよ。ごはんを記録すると、その日の栄養でペコまるが姿を変えるよ！`; }
+  } else { title=fm.title; name=fm.name; msg=fm.msg; }
+
+  const COND={ over:{txt:"食べすぎ気味",emoji:"🍴",col:C.fat}, good:{txt:"いい感じ",emoji:"👍",col:"#16a34a"}, under:{txt:"ひかえめ",emoji:"🍽",col:C.blue} };
+  const cond = d.cond!=="none" ? COND[d.cond] : null;
+  const gp=(v,g)=> g? Math.round(v/g*100):0;
+  const Pill=({l,v,col})=>(<div style={{textAlign:"center",flex:1}}><div style={{fontSize:11,color:C.sub}}>{l}</div><div style={{fontSize:15,fontWeight:700,color:col}}>{v}%</div></div>);
+
   return (
     <div className="card" style={{marginBottom:16,textAlign:"center",background:`linear-gradient(180deg,${fm.soft},#ffffff)`,position:"relative",overflow:"hidden"}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:2}}>
         <span style={{fontSize:12,fontWeight:700,color:fm.color,background:"#fff",borderRadius:8,padding:"3px 9px",boxShadow:"0 1px 2px rgba(0,0,0,.06)"}}>
-          {st.form==="egg" ? "たまご" : `Lv.${st.level}`}
+          {loggedDays===0 ? "たまご" : `Lv.${level}`}
         </span>
-        <span style={{fontSize:12,color:C.sub}}>記録 {st.loggedDays} 日</span>
+        <span style={{fontSize:12,color:C.sub}}>記録 {loggedDays} 日</span>
       </div>
 
-      <Mascot form={st.form}/>
+      <Mascot form={visual}/>
 
-      <div style={{fontSize:13,color:fm.color,fontWeight:700,marginTop:2}}>{fm.emoji} {fm.title}</div>
-      <div style={{fontSize:17,fontWeight:800,color:C.ink,marginTop:2}}>{fm.name}</div>
+      <div style={{fontSize:13,color:fm.color,fontWeight:700,marginTop:2}}>{fm.emoji} {title}</div>
+      <div style={{fontSize:17,fontWeight:800,color:C.ink,marginTop:2}}>{name}</div>
 
-      {st.form!=="egg" && <>
-        <div style={{display:"flex",alignItems:"center",gap:8,margin:"12px 4px 4px"}}>
-          <span style={{fontSize:11,color:C.sub,whiteSpace:"nowrap"}}>つぎのLvまで</span>
-          <div style={{flex:1,height:8,background:"#fff",borderRadius:99,boxShadow:"inset 0 0 0 1px "+C.line}}>
-            <div style={{height:8,width:pct+"%",background:fm.color,borderRadius:99,transition:"width .5s"}}/>
-          </div>
-          <span style={{fontSize:11,color:C.sub,whiteSpace:"nowrap"}}>{st.expInto}/{st.expSpan}日</span>
+      {loggedDays>0 && <div style={{display:"flex",alignItems:"center",gap:8,margin:"12px 4px 4px"}}>
+        <span style={{fontSize:11,color:C.sub,whiteSpace:"nowrap"}}>つぎのLvまで</span>
+        <div style={{flex:1,height:8,background:"#fff",borderRadius:99,boxShadow:"inset 0 0 0 1px "+C.line}}>
+          <div style={{height:8,width:pct+"%",background:fm.color,borderRadius:99,transition:"width .5s"}}/>
         </div>
-      </>}
+        <span style={{fontSize:11,color:C.sub,whiteSpace:"nowrap"}}>{expInto}/{expSpan}日</span>
+      </div>}
 
-      <div style={{fontSize:13,color:C.ink,margin:"10px 6px 0",lineHeight:1.5}}>{fm.msg}</div>
+      <div style={{fontSize:13,color:C.ink,margin:"10px 6px 0",lineHeight:1.5}}>{msg}</div>
 
-      {st.form!=="egg" && <>
+      {!isEgg && <>
         <div style={{display:"flex",gap:6,margin:"12px 0 2px",background:"#fff",borderRadius:12,padding:"10px 6px",boxShadow:"0 1px 2px rgba(0,0,0,.05)"}}>
-          <RatioPill l="P 直近平均" v={st.ratios.p} col={C.prot}/>
-          <RatioPill l="F 直近平均" v={st.ratios.f} col={C.fat}/>
-          <RatioPill l="C 直近平均" v={st.ratios.c} col={C.carb}/>
+          <Pill l={`P ${fmtDate(date)}`} v={gp(d.t.p,goals.p)} col={C.prot}/>
+          <Pill l={`F ${fmtDate(date)}`} v={gp(d.t.f,goals.f)} col={C.fat}/>
+          <Pill l={`C ${fmtDate(date)}`} v={gp(d.t.c,goals.c)} col={C.carb}/>
         </div>
-        <div style={{fontSize:10,color:C.sub,marginTop:4}}>※ 直近{st.recentCount}日の平均を目標と比べた割合。突出した栄養で姿が変わります。</div>
+        <div style={{fontSize:10,color:C.sub,marginTop:4}}>※ {fmtDate(date)} の食事を目標と比べた割合。突出した栄養で姿が変わります。</div>
+        {cond && <div style={{display:"inline-block",marginTop:8,fontSize:12,fontWeight:700,color:cond.col,background:"#fff",borderRadius:99,padding:"4px 12px",boxShadow:"0 1px 2px rgba(0,0,0,.06)"}}>{cond.emoji} この日は {cond.txt}（{Math.round(d.t.kcal)}/{goals.kcal}kcal）</div>}
       </>}
-
-      {todayLine && <div style={{fontSize:12,color:fm.color,fontWeight:600,marginTop:8}}>🍽 {todayLine}</div>}
     </div>
   );
 }
